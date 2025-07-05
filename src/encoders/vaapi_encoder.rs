@@ -258,8 +258,7 @@ impl VaapiEncoder {
             let err = av_hwframe_ctx_init(frame_ctx);
             if err < 0 {
                 return Err(WaycapError::Init(format!(
-                    "Error trying to initialize hw frame context: {:?}",
-                    err
+                    "Error trying to initialize hw frame context: {err:?}",
                 )));
             }
 
@@ -314,10 +313,7 @@ impl VaapiEncoder {
     ) -> Result<ffmpeg::filter::Graph> {
         let mut graph = ffmpeg::filter::Graph::new();
 
-        let args = format!(
-            "video_size={}x{}:pix_fmt=bgra:time_base=1/1000000",
-            width, height
-        );
+        let args = format!("video_size={width}x{height}:pix_fmt=bgra:time_base=1/1000000",);
 
         let mut input = graph.add(&ffmpeg::filter::find("buffer").unwrap(), "in", &args)?;
 
@@ -327,7 +323,7 @@ impl VaapiEncoder {
             "mode=read+write:derive_device=vaapi",
         )?;
 
-        let scale_args = format!("w={}:h={}:format=nv12:out_range=tv", width, height);
+        let scale_args = format!("w={width}:h={height}:format=nv12:out_range=tv");
         let mut scale = graph.add(
             &ffmpeg::filter::find("scale_vaapi").unwrap(),
             "scale",
@@ -355,7 +351,7 @@ impl VaapiEncoder {
 impl Drop for VaapiEncoder {
     fn drop(&mut self) {
         if let Err(e) = self.drain() {
-            log::error!("Error while draining vaapi encoder during drop: {:?}", e);
+            log::error!("Error while draining vaapi encoder during drop: {e:?}");
         }
         self.drop_encoder();
     }

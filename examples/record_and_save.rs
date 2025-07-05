@@ -6,11 +6,7 @@ use std::{
 
 use waycap_rs::{
     pipeline::builder::CaptureBuilder,
-    types::{
-        config::{QualityPreset, VideoEncoder},
-        error::Result,
-        video_frame::EncodedVideoFrame,
-    },
+    types::{config::QualityPreset, error::Result, video_frame::EncodedVideoFrame},
     Capture,
 };
 
@@ -31,7 +27,6 @@ fn main() -> Result<()> {
     let mut capture = CaptureBuilder::new()
         .with_quality_preset(QualityPreset::Medium)
         .with_cursor_shown()
-        .with_video_encoder(VideoEncoder::H264Nvenc)
         .build()?;
 
     let video_recv = capture.take_video_receiver();

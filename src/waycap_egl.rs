@@ -1,8 +1,11 @@
-use std::ffi::{c_void, CStr};
+use std::{
+    cell::Cell,
+    ffi::{c_void, CStr},
+};
 
 use khronos_egl::{self as egl, ClientBuffer, Dynamic, Instance};
 
-use crate::types::video_frame::DmaBufPlane;
+use crate::types::{error::Result, video_frame::DmaBufPlane};
 
 type PFNGLEGLIMAGETARGETTEXTURE2DOESPROC =
     unsafe extern "C" fn(target: gl::types::GLenum, image: *const c_void);
@@ -15,14 +18,29 @@ unsafe impl Send for EglContext {}
 pub enum GpuVendor {
     NVIDIA,
     AMD,
+    INTEL,
     UNKNOWN,
 }
 
 impl From<&CStr> for GpuVendor {
     fn from(value: &CStr) -> Self {
         match value.to_str() {
-            Ok(s) if s.eq_ignore_ascii_case("nvidia") => Self::NVIDIA,
-            Ok(s) if s.eq_ignore_ascii_case("amd") => Self::AMD,
+            Ok(s) => {
+                let s_lower = s.to_lowercase();
+                if s_lower.contains("nvidia") {
+                    Self::NVIDIA
+                } else if s_lower.contains("ati")
+                    || s_lower.contains("amd")
+                    || s_lower.contains("advanced micro devices")
+                {
+                    Self::AMD
+                } else if s_lower.contains("intel") {
+                    Self::INTEL
+                } else {
+                    log::error!("The GPU vendor {s:?} is not supported.");
+                    Self::UNKNOWN
+                }
+            }
             _ => Self::UNKNOWN,
         }
     }
@@ -36,16 +54,17 @@ pub struct EglContext {
     _config: egl::Config,
     dmabuf_supported: bool,
     dmabuf_modifiers_supported: bool,
-    persistent_texture_id: u32,
-    #[allow(dead_code)]
+    persistent_texture_id: Cell<Option<u32>>,
     gpu_vendor: GpuVendor,
+    width: i32,
+    height: i32,
 
     // Keep Wayland display alive
     _wayland_display: wayland_client::Display,
 }
 
 impl EglContext {
-    pub fn new(width: i32, height: i32) -> Result<Self, egl::Error> {
+    pub fn new(width: i32, height: i32) -> Result<Self> {
         let lib =
             unsafe { libloading::Library::new("libEGL.so.1") }.expect("unable to find libEGL.so.1");
         let egl_instance = unsafe { egl::DynamicInstance::<egl::EGL1_5>::load_required_from(lib) }
@@ -87,9 +106,6 @@ impl EglContext {
         let (dmabuf_supported, dmabuf_modifiers_supported) =
             Self::check_dmabuf_support(&egl_instance, display).unwrap();
 
-        let persistent_texture =
-            Self::create_persistent_texture(width as u32, height as u32).unwrap();
-
         let gpu_vendor = GpuVendor::from(egl_instance.query_string(Some(display), egl::VENDOR)?);
 
         Ok(Self {
@@ -100,17 +116,18 @@ impl EglContext {
             surface,
             dmabuf_supported,
             dmabuf_modifiers_supported,
-            persistent_texture_id: persistent_texture,
+            persistent_texture_id: Cell::new(None),
             gpu_vendor,
+            width,
+            height,
 
             _wayland_display: wayland_display,
         })
     }
 
-    pub fn update_texture_from_image(
-        &self,
-        egl_image: egl::Image,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn update_texture_from_image(&self, egl_image: egl::Image) -> Result<()> {
+        assert!(self.persistent_texture_id.get().is_some());
+
         unsafe {
             // Create a temporary texture from the EGL image
             let mut temp_texture = 0;
@@ -126,7 +143,10 @@ impl EglContext {
                     gl::DeleteTextures(1, &temp_texture);
                     return Err("glEGLImageTargetTexture2DOES not available".into());
                 } else {
-                    std::mem::transmute::<Option<extern "system" fn()>, PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(proc_addr)
+                    std::mem::transmute::<
+                        Option<extern "system" fn()>,
+                        PFNGLEGLIMAGETARGETTEXTURE2DOESPROC,
+                    >(proc_addr)
                 }
             };
 
@@ -136,7 +156,7 @@ impl EglContext {
             if gl_error != gl::NO_ERROR {
                 gl::DeleteTextures(1, &temp_texture);
                 return Err(
-                    format!("Failed to bind EGL image to temp texture: 0x{:x}", gl_error).into(),
+                    format!("Failed to bind EGL image to temp texture: 0x{gl_error:x}").into(),
                 );
             }
 
@@ -166,11 +186,11 @@ impl EglContext {
                 gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
                 gl::DeleteFramebuffers(1, &fbo);
                 gl::DeleteTextures(1, &temp_texture);
-                return Err(format!("Framebuffer not complete: 0x{:x}", status).into());
+                return Err(format!("Framebuffer not complete: 0x{status:x}").into());
             }
 
             // Bind persistent texture as destination
-            gl::BindTexture(gl::TEXTURE_2D, self.persistent_texture_id);
+            gl::BindTexture(gl::TEXTURE_2D, self.persistent_texture_id.get().unwrap());
 
             // Use CopyTexSubImage2D instead of CopyTexImage2D
             // This updates existing texture data rather than reallocating
@@ -191,7 +211,7 @@ impl EglContext {
                 gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
                 gl::DeleteFramebuffers(1, &fbo);
                 gl::DeleteTextures(1, &temp_texture);
-                return Err(format!("Failed to copy texture data: 0x{:x}", gl_error).into());
+                return Err(format!("Failed to copy texture data: 0x{gl_error:x}").into());
             }
 
             // Cleanup
@@ -204,10 +224,7 @@ impl EglContext {
         }
     }
 
-    pub fn create_persistent_texture(
-        width: u32,
-        height: u32,
-    ) -> Result<u32, Box<dyn std::error::Error>> {
+    pub fn create_persistent_texture(&self) -> Result<()> {
         unsafe {
             let mut texture_id = 0;
             gl::GenTextures(1, &mut texture_id);
@@ -218,8 +235,8 @@ impl EglContext {
                 gl::TEXTURE_2D,
                 0,
                 gl::RGBA8 as i32, // CUDA-compatible format
-                width as i32,
-                height as i32,
+                self.width,
+                self.height,
                 0,
                 gl::RGBA,
                 gl::UNSIGNED_BYTE,
@@ -238,24 +255,24 @@ impl EglContext {
             if gl_error != gl::NO_ERROR {
                 gl::DeleteTextures(1, &texture_id);
                 return Err(
-                    format!("Failed to create persistent texture: 0x{:x}", gl_error).into(),
+                    format!("Failed to create persistent texture: 0x{gl_error:x}").into(),
                 );
             }
 
             log::trace!(
-                "✓ Created persistent texture: ID {} ({}x{})",
-                texture_id,
-                width,
-                height
+                "✓ Created persistent texture: ID {texture_id} ({}x{})",
+                self.width,
+                self.height
             );
-            Ok(texture_id)
+            self.persistent_texture_id.set(Some(texture_id));
+            Ok(())
         }
     }
 
     fn check_dmabuf_support(
         egl_instance: &Instance<Dynamic<libloading::Library, egl::EGL1_5>>,
         display: egl::Display,
-    ) -> Result<(bool, bool), Box<dyn std::error::Error>> {
+    ) -> Result<(bool, bool)> {
         let extensions = egl_instance.query_string(Some(display), egl::EXTENSIONS)?;
         let ext_str = extensions.to_string_lossy();
 
@@ -276,7 +293,7 @@ impl EglContext {
         width: u32,
         height: u32,
         modifier: u64,
-    ) -> Result<egl::Image, Box<dyn std::error::Error>> {
+    ) -> Result<egl::Image> {
         if !self.dmabuf_supported {
             return Err("DMA-BUF import not supported".into());
         }
@@ -377,15 +394,15 @@ impl EglContext {
                 unsafe { ClientBuffer::from_ptr(std::ptr::null_mut()) },
                 &attributes,
             )
-            .map_err(|e| format!("Failed to create EGL image from DMA-BUF: {:?}", e))?;
+            .map_err(|e| format!("Failed to create EGL image from DMA-BUF: {e:?}"))?;
 
         Ok(image)
     }
 
-    pub fn destroy_image(&self, image: egl::Image) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn destroy_image(&self, image: egl::Image) -> Result<()> {
         self.egl_instance
             .destroy_image(self.display, image)
-            .map_err(|e| format!("Failed to destroy EGL image: {:?}", e).into())
+            .map_err(|e| format!("Failed to destroy EGL image: {e:?}").into())
     }
 
     pub fn delete_texture(&self, texture_id: u32) {
@@ -394,7 +411,7 @@ impl EglContext {
         }
     }
 
-    pub fn make_current(&self) -> Result<(), egl::Error> {
+    pub fn make_current(&self) -> Result<()> {
         self.egl_instance.make_current(
             self.display,
             Some(self.surface),
@@ -404,19 +421,16 @@ impl EglContext {
         Ok(())
     }
 
-    pub fn release_current(&self) -> Result<(), egl::Error> {
+    pub fn release_current(&self) -> Result<()> {
         self.egl_instance
             .make_current(self.display, None, None, None)?;
         Ok(())
     }
 
-    pub fn get_texture_id(&self) -> u32 {
-        self.persistent_texture_id
+    pub fn get_texture_id(&self) -> Option<u32> {
+        self.persistent_texture_id.get()
     }
 
-    // TODO: We can probably leverage this to dynamically set the encoder and deprecate
-    // the need to pass it in
-    #[allow(unused)]
     pub fn get_gpu_vendor(&self) -> GpuVendor {
         self.gpu_vendor
     }
@@ -434,6 +448,8 @@ impl Drop for EglContext {
             .egl_instance
             .destroy_context(self.display, self.context);
         let _ = self.egl_instance.terminate(self.display);
-        self.delete_texture(self.persistent_texture_id);
+        if let Some(texture) = self.persistent_texture_id.get() {
+            self.delete_texture(texture);
+        }
     }
 }

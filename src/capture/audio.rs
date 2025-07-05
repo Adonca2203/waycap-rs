@@ -60,9 +60,9 @@ impl AudioCapture {
 
         let _audio_core_listener = audio_core
             .add_listener_local()
-            .info(|i| log::info!("AUDIO CORE:\n{0:#?}", i))
-            .error(|e, f, g, h| log::error!("{0},{1},{2},{3}", e, f, g, h))
-            .done(|d, _| log::info!("DONE: {0}", d))
+            .info(|i| log::info!("AUDIO CORE:\n{i:#?}"))
+            .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
+            .done(|d, _| log::info!("DONE: {d}"))
             .register();
 
         let data = UserData::default();
@@ -84,7 +84,7 @@ impl AudioCapture {
         let _audio_stream_shared_data_listener = audio_stream
             .add_local_listener_with_user_data(data)
             .state_changed(move |_, _, old, new| {
-                log::debug!("Audio Stream State Changed: {0:?} -> {1:?}", old, new);
+                log::debug!("Audio Stream State Changed: {old:?} -> {new:?}");
                 audio_ready_clone.store(
                     new == StreamState::Streaming,
                     std::sync::atomic::Ordering::Release,
@@ -201,7 +201,7 @@ impl AudioCapture {
 
         let sink_id_to_use = get_default_sink_node_id();
 
-        log::debug!("Default sink id: {:?}", sink_id_to_use);
+        log::debug!("Default sink id: {sink_id_to_use:?}");
         audio_stream.connect(
             Direction::Input,
             sink_id_to_use,
@@ -209,7 +209,7 @@ impl AudioCapture {
             &mut audio_params,
         )?;
 
-        log::debug!("Audio Stream: {:?}", audio_stream);
+        log::debug!("Audio Stream: {audio_stream:?}");
 
         pw_loop.run();
         Ok(())

@@ -95,8 +95,7 @@ impl VideoEncoder for NvencEncoder {
                 );
                 if ret < 0 {
                     return Err(WaycapError::Encoding(format!(
-                        "Failed to allocate CUDA frame buffer: {}",
-                        ret
+                        "Failed to allocate CUDA frame buffer: {ret}",
                     )));
                 }
 
@@ -104,8 +103,7 @@ impl VideoEncoder for NvencEncoder {
                 if result != CUresult::CUDA_SUCCESS {
                     gl::BindTexture(gl::TEXTURE_2D, 0);
                     return Err(WaycapError::Encoding(format!(
-                        "Error mapping GL image to CUDA: {:?}",
-                        result
+                        "Error mapping GL image to CUDA: {result:?}",
                     )));
                 }
 
@@ -121,8 +119,7 @@ impl VideoEncoder for NvencEncoder {
                     cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
                     gl::BindTexture(gl::TEXTURE_2D, 0);
                     return Err(WaycapError::Encoding(format!(
-                        "Error getting CUDA Array: {:?}",
-                        result
+                        "Error getting CUDA Array: {result:?}",
                     )));
                 }
 
@@ -153,8 +150,7 @@ impl VideoEncoder for NvencEncoder {
                     cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
                     gl::BindTexture(gl::TEXTURE_2D, 0);
                     return Err(WaycapError::Encoding(format!(
-                        "Error mapping cuda frame: {:?}",
-                        result
+                        "Error mapping cuda frame: {result:?}",
                     )));
                 }
 
@@ -162,8 +158,7 @@ impl VideoEncoder for NvencEncoder {
                 let result = cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
                 if result != CUresult::CUDA_SUCCESS {
                     return Err(WaycapError::Encoding(format!(
-                        "Could not unmap resource: {:?}",
-                        result
+                        "Could not unmap resource: {result:?}",
                     )));
                 }
 
@@ -294,8 +289,7 @@ impl NvencEncoder {
 
             if err < 0 {
                 return Err(WaycapError::Init(format!(
-                    "Error trying to initialize hw device context: {:?}",
-                    err
+                    "Error trying to initialize hw device context: {err:?}",
                 )));
             }
 
@@ -325,8 +319,7 @@ impl NvencEncoder {
             let err = av_hwframe_ctx_init(frame_ctx);
             if err < 0 {
                 return Err(WaycapError::Init(format!(
-                    "Error trying to initialize hw frame context: {:?}",
-                    err
+                    "Error trying to initialize hw frame context: {err:?}",
                 )));
             }
 
@@ -392,8 +385,7 @@ impl NvencEncoder {
 
             if result != CUresult::CUDA_SUCCESS {
                 return Err(WaycapError::Init(format!(
-                    "Error registering GL texture to CUDA: {:?}",
-                    result
+                    "Error registering GL texture to CUDA: {result:?}",
                 )));
             }
 
@@ -403,8 +395,7 @@ impl NvencEncoder {
                 cuGraphicsUnregisterResource(self.graphics_resource);
                 gl::BindTexture(gl::TEXTURE_2D, 0);
                 return Err(WaycapError::Init(format!(
-                    "Failed to set graphics resource map flags: {:?}",
-                    result
+                    "Failed to set graphics resource map flags: {result:?}",
                 )));
             }
         }
@@ -421,17 +412,17 @@ impl NvencEncoder {
 impl Drop for NvencEncoder {
     fn drop(&mut self) {
         if let Err(e) = self.drain() {
-            log::error!("Error while draining nvenc encoder during drop: {:?}", e);
+            log::error!("Error while draining nvenc encoder during drop: {e:?}");
         }
         self.drop_encoder();
 
         if let Err(e) = self.make_current() {
-            log::error!("Could not make context current during drop: {:?}", e);
+            log::error!("Could not make context current during drop: {e:?}");
         }
 
         let result = unsafe { cuGraphicsUnregisterResource(self.graphics_resource) };
         if result != CUresult::CUDA_SUCCESS {
-            log::error!("Error cleaning up graphics resource: {:?}", result);
+            log::error!("Error cleaning up graphics resource: {result:?}");
         }
     }
 }

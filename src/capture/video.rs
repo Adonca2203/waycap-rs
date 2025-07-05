@@ -97,9 +97,9 @@ impl VideoCapture {
 
         let _listener = core
             .add_listener_local()
-            .info(|i| log::info!("VIDEO CORE:\n{0:#?}", i))
-            .error(|e, f, g, h| log::error!("{0},{1},{2},{3}", e, f, g, h))
-            .done(|d, _| log::info!("DONE: {0}", d))
+            .info(|i| log::info!("VIDEO CORE:\n{i:#?}"))
+            .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
+            .done(|d, _| log::info!("DONE: {d}"))
             .register();
 
         // Set up video stream
@@ -118,7 +118,7 @@ impl VideoCapture {
         let _video_stream = video_stream
             .add_local_listener_with_user_data(data)
             .state_changed(move |_, _, old, new| {
-                log::info!("Video Stream State Changed: {0:?} -> {1:?}", old, new);
+                log::info!("Video Stream State Changed: {old:?} -> {new:?}");
                 ready_clone.store(
                     new == StreamState::Streaming,
                     std::sync::atomic::Ordering::Release,
@@ -164,7 +164,7 @@ impl VideoCapture {
                 match resolution_negotiation_channel.send((width, height)) {
                     Ok(_) => {}
                     Err(_) => {
-                        log::error!("Tried to send resolution update {}x{} but ran into an error on the channel.", width, height);
+                        log::error!("Tried to send resolution update {width}x{height} but ran into an error on the channel.");
                     }
                 };
 
@@ -369,7 +369,7 @@ impl VideoCapture {
             &mut video_params,
         )?;
 
-        log::debug!("Video Stream: {0:?}", video_stream);
+        log::debug!("Video Stream: {video_stream:?}");
 
         pw_loop.run();
         Ok(())

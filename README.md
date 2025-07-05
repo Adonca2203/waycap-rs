@@ -25,7 +25,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-waycap-rs = "0.3.1"
+waycap-rs = "1.0.0"
 crossbeam = "0.8.4"
 ```
 

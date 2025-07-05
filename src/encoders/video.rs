@@ -52,8 +52,7 @@ pub fn create_hw_device(device_type: ffmpeg_next::ffi::AVHWDeviceType) -> Result
         );
         if ret < 0 {
             return Err(WaycapError::Init(format!(
-                "Failed to create hardware device: Error code {}",
-                ret
+                "Failed to create hardware device: Error code {ret:?}",
             )));
         }
 

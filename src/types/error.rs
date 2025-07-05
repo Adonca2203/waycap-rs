@@ -6,6 +6,8 @@ use std::io;
 pub enum WaycapError {
     /// Errors from FFmpeg
     FFmpeg(ffmpeg_next::Error),
+    /// Egl Errors,
+    Egl(khronos_egl::Error),
     /// Errors from PipeWire
     PipeWire(String),
     /// Errors from XDG Portal
@@ -31,17 +33,18 @@ pub enum WaycapError {
 impl fmt::Display for WaycapError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WaycapError::FFmpeg(err) => write!(f, "FFmpeg error: {}", err),
-            WaycapError::PipeWire(msg) => write!(f, "PipeWire error: {}", msg),
-            WaycapError::Portal(msg) => write!(f, "XDG Portal error: {}", msg),
-            WaycapError::Io(err) => write!(f, "I/O error: {}", err),
-            WaycapError::Init(msg) => write!(f, "Initialization error: {}", msg),
-            WaycapError::Config(msg) => write!(f, "Configuration error: {}", msg),
-            WaycapError::Stream(msg) => write!(f, "Stream error: {}", msg),
-            WaycapError::Encoding(msg) => write!(f, "Encoding error: {}", msg),
-            WaycapError::Device(msg) => write!(f, "Device error: {}", msg),
-            WaycapError::Validation(msg) => write!(f, "Validation error: {}", msg),
-            WaycapError::Other(msg) => write!(f, "Error: {}", msg),
+            WaycapError::FFmpeg(err) => write!(f, "FFmpeg error: {err}"),
+            WaycapError::PipeWire(msg) => write!(f, "PipeWire error: {msg}"),
+            WaycapError::Portal(msg) => write!(f, "XDG Portal error: {msg}"),
+            WaycapError::Io(err) => write!(f, "I/O error: {err}"),
+            WaycapError::Init(msg) => write!(f, "Initialization error: {msg}"),
+            WaycapError::Config(msg) => write!(f, "Configuration error: {msg}"),
+            WaycapError::Stream(msg) => write!(f, "Stream error: {msg}"),
+            WaycapError::Encoding(msg) => write!(f, "Encoding error: {msg}"),
+            WaycapError::Device(msg) => write!(f, "Device error: {msg}"),
+            WaycapError::Validation(msg) => write!(f, "Validation error: {msg}"),
+            WaycapError::Other(msg) => write!(f, "Error: {msg}"),
+            WaycapError::Egl(msg) => write!(f, "Egl Error: {msg}"),
         }
     }
 }
@@ -89,6 +92,12 @@ impl From<String> for WaycapError {
 impl From<&str> for WaycapError {
     fn from(err: &str) -> Self {
         WaycapError::Other(err.to_string())
+    }
+}
+
+impl From<khronos_egl::Error> for WaycapError {
+    fn from(err: khronos_egl::Error) -> Self {
+        WaycapError::Egl(err)
     }
 }
 

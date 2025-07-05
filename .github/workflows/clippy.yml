@@ -57,6 +57,3 @@ jobs:
           
     - name: Run Clippy
       run: cargo clippy --all-targets --all-features -- -D warnings
-      
-    - name: Run Clippy (tests)
-      run: cargo clippy --tests --all-features -- -D warnings

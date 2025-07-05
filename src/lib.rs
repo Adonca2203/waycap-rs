@@ -77,7 +77,7 @@ use types::{
     video_frame::{EncodedVideoFrame, RawVideoFrame},
 };
 use utils::{calculate_dimensions, extract_dmabuf_planes};
-use waycap_egl::EglContext;
+use waycap_egl::{EglContext, GpuVendor};
 
 mod capture;
 mod encoders;
@@ -128,7 +128,7 @@ pub struct Capture {
 
 impl Capture {
     fn new(
-        video_encoder_type: VideoEncoderType,
+        video_encoder_type: Option<VideoEncoderType>,
         audio_encoder_type: AudioEncoderType,
         quality: QualityPreset,
         include_cursor: bool,
@@ -165,7 +165,24 @@ impl Capture {
         let stream = active_cast.streams().next().unwrap();
         let stream_node = stream.pipewire_node();
 
-        let use_nvenc_modifiers = match video_encoder_type {
+        let encoder_type = match video_encoder_type {
+            Some(typ) => typ,
+            None => {
+                // Dummy dimensions we just use this go get GPU vendor then drop it
+                let dummy_context = EglContext::new(100, 100)?;
+                match dummy_context.get_gpu_vendor() {
+                    GpuVendor::NVIDIA => VideoEncoderType::H264Nvenc,
+                    GpuVendor::AMD | GpuVendor::INTEL => VideoEncoderType::H264Vaapi,
+                    GpuVendor::UNKNOWN => {
+                        return Err(WaycapError::Init(
+                            "Unknown/Unimplemented GPU vendor".to_string(),
+                        ));
+                    }
+                }
+            }
+        };
+
+        let use_nvenc_modifiers = match encoder_type {
             VideoEncoderType::H264Nvenc => true,
             VideoEncoderType::H264Vaapi => false,
         };
@@ -205,12 +222,13 @@ impl Capture {
 
         join_handles.push(pw_video_capure);
 
-        let egl_context = Arc::new(EglContext::new(width as i32, height as i32).unwrap());
+        let egl_context = Arc::new(EglContext::new(width as i32, height as i32)?);
 
-        let video_encoder: Arc<Mutex<dyn VideoEncoder + Send>> = match video_encoder_type {
+        let video_encoder: Arc<Mutex<dyn VideoEncoder + Send>> = match encoder_type {
             VideoEncoderType::H264Nvenc => {
                 let mut encoder = NvencEncoder::new(width, height, quality)?;
-                encoder.init_gl(egl_context.get_texture_id())?;
+                egl_context.create_persistent_texture()?;
+                encoder.init_gl(egl_context.get_texture_id().unwrap())?;
 
                 Arc::new(Mutex::new(encoder))
             }
@@ -244,7 +262,7 @@ impl Capture {
             audio_ready.store(true, Ordering::Release);
         }
 
-        // Wait till both threads are ready
+        // Wait until both threads are ready
         while !audio_ready.load(Ordering::Acquire) || !video_ready.load(Ordering::Acquire) {
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -315,7 +333,7 @@ impl Capture {
     }
 
     /// Close the connection. Once called the struct cannot be re-used and must be re-built with
-    /// the `CaptureBuilder` to record again.
+    /// the [`crate::pipeline::builder::CaptureBuilder`] to record again.
     /// If your goal is to temporarily stop recording use [`Self::pause`] or [`Self::finish`] + [`Self::reset`]
     pub fn close(&mut self) -> Result<()> {
         self.finish()?;
@@ -460,9 +478,6 @@ fn encoding_loop(
                 continue;
             }
 
-            // Could not figure out if it is possible to do conditional on branches
-            // Need to not recv from audio since it is dropped when not specified leading to
-            // disconnect errors
             if audio_encoder.is_some() {
                 select! {
                     recv(video_recv) -> raw_frame => {
@@ -476,7 +491,7 @@ fn encoding_loop(
                                                 video_encoder.lock().unwrap().process(&raw_frame).unwrap();
                                                 egl_context.destroy_image(img).unwrap();
                                             }
-                                            Err(e) => log::error!("Could not process dma buf frame: {:?}", e),
+                                            Err(e) => log::error!("Could not process dma buf frame: {e:?}"),
                                         }
                                     } else {
                                         video_encoder.lock().unwrap().process(&raw_frame).unwrap();
@@ -520,7 +535,7 @@ fn encoding_loop(
                                                 video_encoder.lock().unwrap().process(&raw_frame).unwrap();
                                                 egl_context.destroy_image(img).unwrap();
                                             }
-                                            Err(e) => log::error!("Could not process dma buf frame: {:?}", e),
+                                            Err(e) => log::error!("Could not process dma buf frame: {e:?}"),
                                         }
                                     } else {
                                         video_encoder.lock().unwrap().process(&raw_frame).unwrap();

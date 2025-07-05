@@ -33,11 +33,15 @@ impl CaptureBuilder {
         }
     }
 
+    /// Optional: Force use a specific video encoder.
+    /// Default: Uses EGL to determine GPU at runtime.
     pub fn with_video_encoder(mut self, encoder: VideoEncoder) -> Self {
         self.video_encoder = Some(encoder);
         self
     }
 
+    /// Optional: Force use a specific audio encoder.
+    /// Default: Opus audio encoder.
     pub fn with_audio_encoder(mut self, encoder: AudioEncoder) -> Self {
         self.audio_encoder = Some(encoder);
         self
@@ -58,21 +62,14 @@ impl CaptureBuilder {
         self
     }
 
+    /// Optional: Set a target FPS for the recording.
+    /// Default: 60fps
     pub fn with_target_fps(mut self, fps: u64) -> Self {
         self.target_fps = fps;
         self
     }
 
     pub fn build(self) -> Result<Capture> {
-        let video_encoder = match self.video_encoder {
-            Some(enc) => enc,
-            None => {
-                return Err(WaycapError::Init(
-                    "Video encoder was not specified".to_string(),
-                ))
-            }
-        };
-
         let quality = match self.quality_preset {
             Some(qual) => qual,
             None => QualityPreset::Medium,
@@ -92,7 +89,7 @@ impl CaptureBuilder {
         };
 
         Capture::new(
-            video_encoder,
+            self.video_encoder,
             audio_encoder,
             quality,
             self.include_cursor,
