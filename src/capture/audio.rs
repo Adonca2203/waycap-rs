@@ -32,6 +32,7 @@ pub struct AudioCapture {
     audio_ready: Arc<AtomicBool>,
 }
 
+// TODO: Similar approach to video capture in how the struct should look
 impl AudioCapture {
     pub fn new(video_ready: Arc<AtomicBool>, audio_ready: Arc<AtomicBool>) -> Self {
         Self {

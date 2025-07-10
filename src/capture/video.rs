@@ -12,19 +12,26 @@ use crossbeam::channel::Sender;
 use pipewire::{
     self as pw,
     context::Context,
+    core::{Core, Listener},
     main_loop::MainLoop,
     spa::{
         buffer::{Data, DataType},
         pod::{Property, PropertyFlags},
         utils::{Choice, ChoiceEnum, ChoiceFlags, Direction},
     },
-    stream::{Stream, StreamFlags, StreamState},
+    stream::{Stream, StreamFlags, StreamListener, StreamState},
 };
 use pw::{properties::properties, spa};
 
 use spa::pod::Pod;
 
-use crate::types::video_frame::RawVideoFrame;
+use crate::{
+    types::{
+        error::{Result, WaycapError},
+        video_frame::RawVideoFrame,
+    },
+    Resolution,
+};
 
 use super::Terminate;
 
@@ -48,9 +55,18 @@ const NVIDIA_MODIFIERS: &[i64] = &[
 ];
 
 pub struct VideoCapture {
-    video_ready: Arc<AtomicBool>,
-    audio_ready: Arc<AtomicBool>,
-    use_nvidia_modifiers: bool,
+    termination_recv: Option<pw::channel::Receiver<Terminate>>,
+    pipewire_state: PipewireState,
+}
+
+// Need to keep all of these alive even if never referenced
+struct PipewireState {
+    pw_loop: MainLoop,
+    _pw_context: Context,
+    _core: Core,
+    _core_listener: Listener,
+    _stream: Stream,
+    _stream_listener: StreamListener<UserData>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -59,63 +75,89 @@ struct UserData {
 }
 
 impl VideoCapture {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        pipewire_fd: RawFd,
+        stream_node: u32,
         video_ready: Arc<AtomicBool>,
         audio_ready: Arc<AtomicBool>,
         use_nvidia_modifiers: bool,
-    ) -> Self {
-        Self {
-            video_ready,
-            audio_ready,
-            use_nvidia_modifiers,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn run(
-        &self,
-        pipewire_fd: RawFd,
-        stream_node: u32,
-        frame_tx: Sender<RawVideoFrame>,
-        termination_recv: pw::channel::Receiver<Terminate>,
         saving: Arc<AtomicBool>,
         start_time: Instant,
-        resolution_negotiation_channel: mpsc::Sender<(u32, u32)>,
-    ) -> Result<(), pipewire::Error> {
+        resolution_sender: mpsc::Sender<Resolution>,
+        frame_tx: Sender<RawVideoFrame>,
+        termination_recv: pw::channel::Receiver<Terminate>,
+    ) -> Result<Self> {
         let pw_loop = MainLoop::new(None)?;
-        let terminate_loop = pw_loop.clone();
+        let context = Context::new(&pw_loop)?;
+        let mut core = context.connect_fd(unsafe { OwnedFd::from_raw_fd(pipewire_fd) }, None)?;
+        let core_listener = Self::setup_core_listener(&mut core)?;
+        let mut stream = Self::create_stream(&core)?;
+        let stream_listener = Self::setup_stream_listener(
+            &mut stream,
+            UserData::default(),
+            &video_ready,
+            &audio_ready,
+            &saving,
+            resolution_sender.clone(),
+            start_time,
+            frame_tx.clone(),
+        )?;
+        Self::connect_stream(&mut stream, stream_node, use_nvidia_modifiers)?;
 
-        let _recv = termination_recv.attach(pw_loop.loop_(), move |_| {
-            log::debug!("Terminating video capture loop");
-            terminate_loop.quit();
-        });
+        Ok(Self {
+            termination_recv: Some(termination_recv),
+            pipewire_state: PipewireState {
+                pw_loop,
+                _pw_context: context,
+                _core: core,
+                _core_listener: core_listener,
+                _stream: stream,
+                _stream_listener: stream_listener,
+            },
+        })
+    }
 
-        let pw_context = Context::new(&pw_loop)?;
-        let core = pw_context.connect_fd(unsafe { OwnedFd::from_raw_fd(pipewire_fd) }, None)?;
-
-        let data = UserData::default();
-
-        let _listener = core
-            .add_listener_local()
-            .info(|i| log::info!("VIDEO CORE:\n{i:#?}"))
-            .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
-            .done(|d, _| log::info!("DONE: {d}"))
-            .register();
-
-        // Set up video stream
-        let video_stream = Stream::new(
-            &core,
+    fn create_stream(core: &Core) -> Result<Stream> {
+        match Stream::new(
+            core,
             "waycap-video",
             properties! {
                 *pw::keys::MEDIA_TYPE => "Video",
                 *pw::keys::MEDIA_CATEGORY => "Capture",
                 *pw::keys::MEDIA_ROLE => "Screen",
             },
-        )?;
+        ) {
+            Ok(stream) => Ok(stream),
+            Err(e) => Err(WaycapError::from(e)),
+        }
+    }
 
-        let ready_clone = Arc::clone(&self.video_ready);
-        let audio_ready_clone = Arc::clone(&self.audio_ready);
-        let _video_stream = video_stream
+    fn setup_core_listener(core: &mut Core) -> Result<Listener> {
+        Ok(core
+            .add_listener_local()
+            .info(|i| log::debug!("VIDEO CORE:\n{i:#?}"))
+            .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
+            .done(|d, _| log::debug!("DONE: {d}"))
+            .register())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn setup_stream_listener(
+        stream: &mut Stream,
+        data: UserData,
+        video_ready: &Arc<AtomicBool>,
+        audio_ready: &Arc<AtomicBool>,
+        saving: &Arc<AtomicBool>,
+        resolution_sender: mpsc::Sender<Resolution>,
+        start_time: Instant,
+        frame_tx: Sender<RawVideoFrame>,
+    ) -> Result<StreamListener<UserData>> {
+        let ready_clone = Arc::clone(video_ready);
+        let audio_ready_clone = Arc::clone(audio_ready);
+        let saving_clone = Arc::clone(saving);
+
+        let stream_listener = stream
             .add_local_listener_with_user_data(data)
             .state_changed(move |_, _, old, new| {
                 log::info!("Video Stream State Changed: {old:?} -> {new:?}");
@@ -161,7 +203,7 @@ impl VideoCapture {
                     user_data.video_format.size().width,
                     user_data.video_format.size().height,
                     );
-                match resolution_negotiation_channel.send((width, height)) {
+                match resolution_sender.send(Resolution { width, height }) {
                     Ok(_) => {}
                     Err(_) => {
                         log::error!("Tried to send resolution update {width}x{height} but ran into an error on the channel.");
@@ -185,7 +227,7 @@ impl VideoCapture {
                     Some(mut buffer) => {
                         // Wait until audio is streaming before we try to process
                         if !audio_ready_clone.load(std::sync::atomic::Ordering::Acquire)
-                            || saving.load(std::sync::atomic::Ordering::Acquire)
+                            || saving_clone.load(std::sync::atomic::Ordering::Acquire)
                         {
                             return;
                         }
@@ -231,8 +273,15 @@ impl VideoCapture {
             })
             .register()?;
 
-        // TODO: Use features? Probably should not have runtime conditionals like this
-        let pw_obj = if self.use_nvidia_modifiers {
+        Ok(stream_listener)
+    }
+
+    fn connect_stream(
+        stream: &mut Stream,
+        stream_node: u32,
+        use_nvidia_modifiers: bool,
+    ) -> Result<()> {
+        let pw_obj = if use_nvidia_modifiers {
             let nvidia_mod_property = Property {
                 key: pw::spa::param::format::FormatProperties::VideoModifier.as_raw(),
                 flags: PropertyFlags::empty(),
@@ -245,7 +294,7 @@ impl VideoCapture {
                 ))),
             };
 
-            Some(pw::spa::pod::object!(
+            pw::spa::pod::object!(
                 pw::spa::utils::SpaTypes::ObjectParamFormat,
                 pw::spa::param::ParamType::EnumFormat,
                 pw::spa::pod::property!(
@@ -295,9 +344,9 @@ impl VideoCapture {
                     pw::spa::utils::Fraction { num: 0, denom: 1 },   // Min
                     pw::spa::utils::Fraction { num: 244, denom: 1 }  // Max
                 ),
-            ))
+            )
         } else {
-            Some(pw::spa::pod::object!(
+            pw::spa::pod::object!(
                 pw::spa::utils::SpaTypes::ObjectParamFormat,
                 pw::spa::param::ParamType::EnumFormat,
                 pw::spa::pod::property!(
@@ -351,27 +400,40 @@ impl VideoCapture {
                     pw::spa::utils::Fraction { num: 0, denom: 1 },   // Min
                     pw::spa::utils::Fraction { num: 244, denom: 1 }  // Max
                 ),
-            ))
+            )
         };
 
         let video_spa_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
             std::io::Cursor::new(Vec::new()),
-            &pw::spa::pod::Value::Object(pw_obj.unwrap()),
+            &pw::spa::pod::Value::Object(pw_obj),
         )
         .unwrap()
         .0
         .into_inner();
+
         let mut video_params = [Pod::from_bytes(&video_spa_values).unwrap()];
-        video_stream.connect(
+        stream.connect(
             Direction::Input,
             Some(stream_node),
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
             &mut video_params,
         )?;
 
-        log::debug!("Video Stream: {video_stream:?}");
+        Ok(())
+    }
 
-        pw_loop.run();
+    /// Finalizes the pipewire run loop with a terminate receiver and runs it
+    /// Blocks the current thread so this must be called in a separate thread
+    pub fn run(&mut self) -> Result<()> {
+        let terminate_loop = self.pipewire_state.pw_loop.clone();
+        let terminate_recv = self.termination_recv.take().unwrap();
+        let _recv = terminate_recv.attach(self.pipewire_state.pw_loop.loop_(), move |_| {
+            log::debug!("Terminating video capture loop");
+            terminate_loop.quit();
+        });
+
+        self.pipewire_state.pw_loop.run();
+
         Ok(())
     }
 

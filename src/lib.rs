@@ -86,6 +86,11 @@ pub mod types;
 mod utils;
 mod waycap_egl;
 
+pub struct Resolution {
+    width: u32,
+    height: u32,
+}
+
 /// Main capture instance for recording screen content and audio.
 ///
 /// `Capture` provides methods to control the recording process, retrieve
@@ -120,7 +125,7 @@ pub struct Capture {
     pause_flag: Arc<AtomicBool>,
     egl_ctx: Arc<EglContext>,
 
-    worker_handles: Vec<std::thread::JoinHandle<()>>,
+    worker_handles: Vec<std::thread::JoinHandle<Result<()>>>,
 
     pw_video_terminate_tx: pipewire::channel::Sender<Terminate>,
     pw_audio_terminate_tx: Option<pipewire::channel::Sender<Terminate>>,
@@ -139,7 +144,7 @@ impl Capture {
         let pause = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
 
-        let mut join_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        let mut join_handles = Vec::new();
 
         let audio_ready = Arc::new(AtomicBool::new(false));
         let video_ready = Arc::new(AtomicBool::new(false));
@@ -147,7 +152,7 @@ impl Capture {
         let (frame_tx, frame_rx): (Sender<RawVideoFrame>, Receiver<RawVideoFrame>) = bounded(10);
 
         let (pw_sender, pw_recv) = pipewire::channel::channel();
-        let (reso_sender, reso_recv) = mpsc::channel::<(u32, u32)>();
+        let (reso_sender, reso_recv) = mpsc::channel::<Resolution>();
         let video_ready_pw = Arc::clone(&video_ready);
         let audio_ready_pw = Arc::clone(&audio_ready);
         let pause_video = Arc::clone(&pause);
@@ -187,29 +192,50 @@ impl Capture {
             VideoEncoderType::H264Vaapi => false,
         };
 
-        let pw_video_capure = std::thread::spawn(move || {
-            let video_cap = VideoCapture::new(video_ready_pw, audio_ready_pw, use_nvenc_modifiers);
-            video_cap
-                .run(
-                    fd,
-                    stream_node,
-                    frame_tx,
-                    pw_recv,
-                    pause_video,
-                    current_time,
-                    reso_sender,
-                )
-                .unwrap();
+        let pw_video_capure = std::thread::spawn(move || -> Result<()> {
+            let mut video_cap = match VideoCapture::new(
+                fd,
+                stream_node,
+                video_ready_pw,
+                audio_ready_pw,
+                use_nvenc_modifiers,
+                pause_video,
+                current_time,
+                reso_sender,
+                frame_tx,
+                pw_recv,
+            ) {
+                Ok(pw_capture) => pw_capture,
+                Err(e) => {
+                    log::error!("Error initializing pipewire struct: {e:}");
+                    return Err(e);
+                }
+            };
+
+            video_cap.run()?;
+
+            // video_cap
+            //     .run(
+            //         fd,
+            //         stream_node,
+            //         frame_tx,
+            //         pw_recv,
+            //         pause_video,
+            //         current_time,
+            //         reso_sender,
+            //     )
+            //     .unwrap();
 
             let _ = active_cast.close(); // Keep this alive until the thread ends
+            Ok(())
         });
 
         // Wait to get back a negotiated resolution from pipewire
         let timeout = Duration::from_secs(5);
         let start = Instant::now();
-        let (width, height) = loop {
-            if let Ok((recv_width, recv_height)) = reso_recv.recv() {
-                break (recv_width, recv_height);
+        let resolution = loop {
+            if let Ok(reso) = reso_recv.recv() {
+                break reso;
             }
 
             if start.elapsed() > timeout {
@@ -222,19 +248,24 @@ impl Capture {
 
         join_handles.push(pw_video_capure);
 
-        let egl_context = Arc::new(EglContext::new(width as i32, height as i32)?);
+        let egl_context = Arc::new(EglContext::new(
+            resolution.width as i32,
+            resolution.height as i32,
+        )?);
 
         let video_encoder: Arc<Mutex<dyn VideoEncoder + Send>> = match encoder_type {
             VideoEncoderType::H264Nvenc => {
-                let mut encoder = NvencEncoder::new(width, height, quality)?;
+                let mut encoder = NvencEncoder::new(resolution.width, resolution.height, quality)?;
                 egl_context.create_persistent_texture()?;
                 encoder.init_gl(egl_context.get_texture_id().unwrap())?;
 
                 Arc::new(Mutex::new(encoder))
             }
-            VideoEncoderType::H264Vaapi => {
-                Arc::new(Mutex::new(VaapiEncoder::new(width, height, quality)?))
-            }
+            VideoEncoderType::H264Vaapi => Arc::new(Mutex::new(VaapiEncoder::new(
+                resolution.width,
+                resolution.height,
+                quality,
+            )?)),
         };
 
         let mut audio_encoder: Option<Arc<Mutex<dyn AudioEncoder + Send>>> = None;
@@ -244,13 +275,13 @@ impl Capture {
             let pause_capture = Arc::clone(&pause);
             let video_r = Arc::clone(&video_ready);
             let audio_r = Arc::clone(&audio_ready);
-            let pw_audio_worker = std::thread::spawn(move || {
+            let pw_audio_worker = std::thread::spawn(move || -> Result<()> {
                 log::debug!("Starting audio stream");
                 let audio_cap = AudioCapture::new(video_r, audio_r);
-                audio_cap
-                    .run(audio_tx, current_time, pw_audio_recv, pause_capture)
-                    .unwrap();
+                audio_cap.run(audio_tx, current_time, pw_audio_recv, pause_capture)?;
+                Ok(())
             });
+
             join_handles.push(pw_audio_worker);
 
             let enc: Arc<Mutex<dyn AudioEncoder + Send>> = match audio_encoder_type {
@@ -451,10 +482,10 @@ fn encoding_loop(
     pause: Arc<AtomicBool>,
     target_fps: u64,
     egl_context: Arc<EglContext>,
-) -> std::thread::JoinHandle<()> {
+) -> std::thread::JoinHandle<Result<()>> {
     egl_context.release_current().unwrap();
 
-    std::thread::spawn(move || {
+    std::thread::spawn(move || -> Result<()> {
         // CUDA contexts are thread local so set ours to this thread
         let is_nvenc = video_encoder.lock().unwrap().as_any().is::<NvencEncoder>();
         if is_nvenc {
@@ -464,10 +495,9 @@ fn encoding_loop(
                 .as_any()
                 .downcast_ref::<NvencEncoder>()
                 .unwrap()
-                .make_current()
-                .unwrap();
+                .make_current()?;
         }
-        egl_context.make_current().unwrap();
+        egl_context.make_current()?;
 
         let mut last_timestamp: u64 = 0;
         let frame_interval = 1_000_000 / target_fps;
@@ -488,13 +518,13 @@ fn encoding_loop(
                                     if is_nvenc {
                                         match process_dmabuf_frame(&egl_context, &raw_frame) {
                                             Ok(img) => {
-                                                video_encoder.lock().unwrap().process(&raw_frame).unwrap();
-                                                egl_context.destroy_image(img).unwrap();
+                                                video_encoder.lock().unwrap().process(&raw_frame)?;
+                                                egl_context.destroy_image(img)?;
                                             }
                                             Err(e) => log::error!("Could not process dma buf frame: {e:?}"),
                                         }
                                     } else {
-                                        video_encoder.lock().unwrap().process(&raw_frame).unwrap();
+                                        video_encoder.lock().unwrap().process(&raw_frame)?;
                                     }
                                     last_timestamp = current_time;
                                 }
@@ -510,7 +540,7 @@ fn encoding_loop(
                             Ok(raw_samples) => {
                                 // If we are getting samples then we know this must be set or we
                                 // wouldn't be in here
-                                audio_encoder.as_ref().unwrap().lock().unwrap().process(raw_samples).unwrap();
+                                audio_encoder.as_ref().unwrap().lock().unwrap().process(raw_samples)?;
                             }
                             Err(_) => {
                                 log::info!("Audio channel disconnected");
@@ -532,13 +562,13 @@ fn encoding_loop(
                                     if is_nvenc {
                                         match process_dmabuf_frame(&egl_context, &raw_frame) {
                                             Ok(img) => {
-                                                video_encoder.lock().unwrap().process(&raw_frame).unwrap();
-                                                egl_context.destroy_image(img).unwrap();
+                                                video_encoder.lock().unwrap().process(&raw_frame)?;
+                                                egl_context.destroy_image(img)?;
                                             }
                                             Err(e) => log::error!("Could not process dma buf frame: {e:?}"),
                                         }
                                     } else {
-                                        video_encoder.lock().unwrap().process(&raw_frame).unwrap();
+                                        video_encoder.lock().unwrap().process(&raw_frame)?;
                                     }
                                     last_timestamp = current_time;
                                 }
@@ -555,6 +585,7 @@ fn encoding_loop(
                 }
             }
         }
+        Ok(())
     })
 }
 
@@ -565,11 +596,10 @@ fn process_dmabuf_frame(egl_ctx: &EglContext, raw_frame: &RawVideoFrame) -> Resu
     let (width, height) = calculate_dimensions(raw_frame)?;
     let modifier = raw_frame.modifier;
 
-    let egl_image = egl_ctx
-        .create_image_from_dmabuf(&dma_buf_planes, format, width, height, modifier)
-        .unwrap();
+    let egl_image =
+        egl_ctx.create_image_from_dmabuf(&dma_buf_planes, format, width, height, modifier)?;
 
-    egl_ctx.update_texture_from_image(egl_image).unwrap();
+    egl_ctx.update_texture_from_image(egl_image)?;
 
     Ok(egl_image)
 }
