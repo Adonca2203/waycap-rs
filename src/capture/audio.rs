@@ -85,7 +85,7 @@ impl AudioCapture {
         let _audio_stream_shared_data_listener = audio_stream
             .add_local_listener_with_user_data(data)
             .state_changed(move |_, _, old, new| {
-                log::debug!("Audio Stream State Changed: {old:?} -> {new:?}");
+                log::info!("Audio Stream State Changed: {old:?} -> {new:?}");
                 audio_ready_clone.store(
                     new == StreamState::Streaming,
                     std::sync::atomic::Ordering::Release,
