@@ -61,9 +61,9 @@ impl AudioCapture {
 
         let _audio_core_listener = audio_core
             .add_listener_local()
-            .info(|i| log::info!("AUDIO CORE:\n{i:#?}"))
+            .info(|i| log::debug!("AUDIO CORE:\n{i:#?}"))
             .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
-            .done(|d, _| log::info!("DONE: {d}"))
+            .done(|d, _| log::debug!("DONE: {d}"))
             .register();
 
         let data = UserData::default();
