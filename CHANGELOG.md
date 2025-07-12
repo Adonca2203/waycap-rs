@@ -55,3 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - This library was extracted from the [WayCap](https://github.com/Adonca2203/WayCap) project to provide a reusable screen capture solution
 - Designed for low-latency screen recording applications
 - Optimized for Wayland desktop environments on Linux
+
+## [1.0.1] - 2025-07-11
+### Changed
+- `finish()` now discards remaining frames in encoder buffers instead of sending them to receivers, preventing channel overflow errors

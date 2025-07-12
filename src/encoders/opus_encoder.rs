@@ -139,26 +139,7 @@ impl AudioEncoder for OpusEncoder {
         if let Some(ref mut encoder) = self.encoder {
             encoder.send_eof()?;
             let mut packet = ffmpeg::codec::packet::Packet::empty();
-            while encoder.receive_packet(&mut packet).is_ok() {
-                if let Some(data) = packet.data() {
-                    let pts = packet.pts().unwrap_or(0);
-                    match self.encoded_samples_sender.try_send(EncodedAudioFrame {
-                        data: data.to_vec(),
-                        pts,
-                        timestamp: self.capture_timestamps.pop_front().unwrap_or(0),
-                    }) {
-                        Ok(_) => {}
-                        Err(crossbeam::channel::TrySendError::Full(_)) => {
-                            log::error!("Could not send encoded audio frame. Receiver is full");
-                        }
-                        Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
-                            log::error!(
-                                "Cound not send encoded audio frame. Receiver disconnected"
-                            );
-                        }
-                    }
-                }
-            }
+            while encoder.receive_packet(&mut packet).is_ok() {} // Discard frames
         }
 
         Ok(())

@@ -342,7 +342,7 @@ impl Capture {
     }
 
     /// Stop recording and drain the encoders of any last frames they have in their internal
-    /// buffers
+    /// buffers. These frames are discarded.
     pub fn finish(&mut self) -> Result<()> {
         self.pause_flag.store(true, Ordering::Release);
         self.video_encoder.lock().unwrap().drain()?;

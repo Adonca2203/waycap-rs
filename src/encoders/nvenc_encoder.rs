@@ -198,27 +198,7 @@ impl VideoEncoder for NvencEncoder {
             // Drain encoder
             encoder.send_eof()?;
             let mut packet = ffmpeg::codec::packet::Packet::empty();
-            while encoder.receive_packet(&mut packet).is_ok() {
-                if let Some(data) = packet.data() {
-                    match self.encoded_frame_sender.try_send(EncodedVideoFrame {
-                        data: data.to_vec(),
-                        is_keyframe: packet.is_key(),
-                        pts: packet.pts().unwrap_or(0),
-                        dts: packet.dts().unwrap_or(0),
-                    }) {
-                        Ok(_) => {}
-                        Err(crossbeam::channel::TrySendError::Full(_)) => {
-                            log::error!("Could not send encoded video frame. Receiver is full");
-                        }
-                        Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
-                            log::error!(
-                                "Cound not send encoded video frame. Receiver disconnected"
-                            );
-                        }
-                    }
-                };
-                packet = ffmpeg::codec::packet::Packet::empty();
-            }
+            while encoder.receive_packet(&mut packet).is_ok() {} // Discard these frames
         }
         Ok(())
     }
