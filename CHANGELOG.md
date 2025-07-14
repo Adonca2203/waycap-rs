@@ -59,3 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.1] - 2025-07-11
 ### Changed
 - `finish()` now discards remaining frames in encoder buffers instead of sending them to receivers, preventing channel overflow errors
+
+## [1.0.2] - 2025-07-13
+### Changed
+- Pipewire logging is now debug for the `core` logs.
