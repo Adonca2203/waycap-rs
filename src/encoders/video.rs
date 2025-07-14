@@ -6,8 +6,8 @@ use crate::types::error::{Result, WaycapError};
 use crate::types::video_frame::RawVideoFrame;
 use crate::types::{config::QualityPreset, video_frame::EncodedVideoFrame};
 use crossbeam::channel::Receiver;
-use ffmpeg_next::{self as ffmpeg};
 use ffmpeg::ffi::{av_hwdevice_ctx_create, av_hwframe_ctx_alloc, AVBufferRef};
+use ffmpeg_next::{self as ffmpeg};
 
 pub const GOP_SIZE: u32 = 30;
 

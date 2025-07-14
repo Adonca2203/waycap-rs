@@ -254,9 +254,7 @@ impl EglContext {
             let gl_error = gl::GetError();
             if gl_error != gl::NO_ERROR {
                 gl::DeleteTextures(1, &texture_id);
-                return Err(
-                    format!("Failed to create persistent texture: 0x{gl_error:x}").into(),
-                );
+                return Err(format!("Failed to create persistent texture: 0x{gl_error:x}").into());
             }
 
             log::trace!(
