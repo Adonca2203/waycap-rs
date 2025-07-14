@@ -20,7 +20,7 @@ pub trait VideoEncoder: Send {
     fn reset(&mut self) -> Result<()>;
     fn drop_encoder(&mut self);
     fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video>;
-    fn take_encoded_recv(&mut self) -> Option<Receiver<EncodedVideoFrame>>;
+    fn get_encoded_recv(&mut self) -> Option<Receiver<EncodedVideoFrame>>;
 
     fn as_any(&self) -> &dyn Any;
 }

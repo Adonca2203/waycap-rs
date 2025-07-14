@@ -29,7 +29,7 @@ fn main() -> Result<()> {
         .with_cursor_shown()
         .build()?;
 
-    let video_recv = capture.take_video_receiver();
+    let video_recv = capture.get_video_receiver();
 
     // Use a BTree Map so it is sorted by DTS
     // needed like this for export time monotonic dts times

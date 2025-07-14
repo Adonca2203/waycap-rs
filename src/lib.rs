@@ -37,8 +37,8 @@
 //!     capture.start()?;
 //!     
 //!     // Get receivers for encoded frames
-//!     let video_receiver = capture.take_video_receiver();
-//!     let audio_receiver = capture.take_audio_receiver()?;
+//!     let video_receiver = capture.get_video_receiver();
+//!     let audio_receiver = capture.get_audio_receiver()?;
 //!     
 //!     // Process frames as needed...
 //!     
@@ -112,7 +112,7 @@ pub struct Resolution {
 /// capture.start().expect("Failed to start capture");
 ///
 /// // Get video receiver
-/// let video_receiver = capture.take_video_receiver();
+/// let video_receiver = capture.get_video_receiver();
 ///
 /// // Process Frames
 /// while let Some(encoded_frame) = video_receiver.try_pop() {
@@ -384,27 +384,25 @@ impl Capture {
         Ok(())
     }
 
-    /// Take ownership of the ring buffer which will supply you with encoded video frame data
+    /// Get a channel for which to receive encoded video frames.
     ///
-    /// **IMPORTANT**
-    ///
-    /// This gives you ownership of the buffer so this can only be called *once*
-    pub fn take_video_receiver(&mut self) -> Receiver<EncodedVideoFrame> {
+    /// Returns a [`crossbeam::channel::Receiver`] which allows multiple consumers.
+    /// Each call creates a new consumer that will receive all future frames.
+    pub fn get_video_receiver(&mut self) -> Receiver<EncodedVideoFrame> {
         self.video_encoder
             .lock()
             .unwrap()
-            .take_encoded_recv()
+            .get_encoded_recv()
             .unwrap()
     }
 
-    /// Take ownership of the ring buffer which will supply you with encoded audio frame data
+    /// Get a channel for which to receive encoded audio frames.
     ///
-    /// **IMPORTANT**
-    ///
-    /// This gives you ownership of the buffer so this can only be called *once*
-    pub fn take_audio_receiver(&mut self) -> Result<Receiver<EncodedAudioFrame>> {
+    /// Returns a [`crossbeam::channel::Receiver`] which allows multiple consumers.
+    /// Each call creates a new consumer that will receive all future frames.
+    pub fn get_audio_receiver(&mut self) -> Result<Receiver<EncodedAudioFrame>> {
         if let Some(ref mut audio_enc) = self.audio_encoder {
-            return Ok(audio_enc.lock().unwrap().take_encoded_recv().unwrap());
+            return Ok(audio_enc.lock().unwrap().get_encoded_recv().unwrap());
         } else {
             Err(WaycapError::Validation(
                 "Audio encoder does not exist".to_string(),

@@ -225,8 +225,8 @@ impl VideoEncoder for NvencEncoder {
         self.encoder.take();
     }
 
-    fn take_encoded_recv(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
-        self.encoded_frame_recv.take()
+    fn get_encoded_recv(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
+        self.encoded_frame_recv.clone()
     }
 }
 

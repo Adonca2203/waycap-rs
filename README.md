@@ -48,8 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     capture.start()?;
     
     // Get receivers for encoded frames
-    let video_receiver = capture.take_video_receiver();
-    let audio_receiver = capture.take_audio_receiver()?;
+    let video_receiver = capture.get_video_receiver();
+    let audio_receiver = capture.get_audio_receiver()?;
     
     // Process frames in separate threads
     let video_thread = thread::spawn(move || {

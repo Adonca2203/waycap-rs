@@ -15,7 +15,7 @@ pub trait AudioEncoder: Send {
     fn drain(&mut self) -> Result<()>;
     fn reset(&mut self) -> Result<()>;
     fn get_encoder(&self) -> &Option<ffmpeg_next::codec::encoder::Audio>;
-    fn take_encoded_recv(&mut self) -> Option<Receiver<EncodedAudioFrame>>;
+    fn get_encoded_recv(&mut self) -> Option<Receiver<EncodedAudioFrame>>;
     fn drop_encoder(&mut self);
 }
 

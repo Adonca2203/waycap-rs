@@ -63,3 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.2] - 2025-07-13
 ### Changed
 - Pipewire logging is now debug for the `core` logs.
+
+## [2.0.0] - 2025-07-14
+### Breaking Changes
+- Renamed `take_video_receiver` to `get_video_receiver`
+- Renamed `take_audio_receiver` to `get_audio_receiver`
+- These now return a copy to the channel instead of give ownership allowing multiple consumers to receive the frames

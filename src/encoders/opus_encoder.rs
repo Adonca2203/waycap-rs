@@ -157,7 +157,7 @@ impl AudioEncoder for OpusEncoder {
         Ok(())
     }
 
-    fn take_encoded_recv(&mut self) -> Option<Receiver<EncodedAudioFrame>> {
-        self.encoded_samples_recv.take()
+    fn get_encoded_recv(&mut self) -> Option<Receiver<EncodedAudioFrame>> {
+        self.encoded_samples_recv.clone()
     }
 }

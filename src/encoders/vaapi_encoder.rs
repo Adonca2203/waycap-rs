@@ -195,8 +195,8 @@ impl VideoEncoder for VaapiEncoder {
         self.filter_graph.take();
     }
 
-    fn take_encoded_recv(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
-        self.encoded_frame_recv.take()
+    fn get_encoded_recv(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
+        self.encoded_frame_recv.clone()
     }
 }
 
