@@ -79,6 +79,8 @@ use types::{
 use utils::{calculate_dimensions, extract_dmabuf_planes};
 use waycap_egl::{EglContext, GpuVendor};
 
+use crate::utils::TIME_UNIT_NS;
+
 mod capture;
 mod encoders;
 pub mod pipeline;
@@ -86,6 +88,7 @@ pub mod types;
 mod utils;
 mod waycap_egl;
 
+/// Target Screen Resolution
 pub struct Resolution {
     width: u32,
     height: u32,
@@ -140,7 +143,6 @@ impl Capture {
         include_audio: bool,
         target_fps: u64,
     ) -> Result<Self> {
-        let current_time = Instant::now();
         let pause = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -200,7 +202,6 @@ impl Capture {
                 audio_ready_pw,
                 use_nvenc_modifiers,
                 pause_video,
-                current_time,
                 reso_sender,
                 frame_tx,
                 pw_recv,
@@ -213,18 +214,6 @@ impl Capture {
             };
 
             video_cap.run()?;
-
-            // video_cap
-            //     .run(
-            //         fd,
-            //         stream_node,
-            //         frame_tx,
-            //         pw_recv,
-            //         pause_video,
-            //         current_time,
-            //         reso_sender,
-            //     )
-            //     .unwrap();
 
             let _ = active_cast.close(); // Keep this alive until the thread ends
             Ok(())
@@ -240,7 +229,9 @@ impl Capture {
 
             if start.elapsed() > timeout {
                 log::error!("Timeout waiting for PipeWire negotiated resolution.");
-                std::process::exit(1);
+                return Err(WaycapError::Init(
+                    "Timed out waiting for pipewire to negotiate video resolution".into(),
+                ));
             }
 
             std::thread::sleep(Duration::from_millis(100));
@@ -278,7 +269,7 @@ impl Capture {
             let pw_audio_worker = std::thread::spawn(move || -> Result<()> {
                 log::debug!("Starting audio stream");
                 let audio_cap = AudioCapture::new(video_r, audio_r);
-                audio_cap.run(audio_tx, current_time, pw_audio_recv, pause_capture)?;
+                audio_cap.run(audio_tx, pw_audio_recv, pause_capture)?;
                 Ok(())
             });
 
@@ -498,7 +489,7 @@ fn encoding_loop(
         egl_context.make_current()?;
 
         let mut last_timestamp: u64 = 0;
-        let frame_interval = 1_000_000 / target_fps;
+        let frame_interval = TIME_UNIT_NS / target_fps;
 
         while !stop.load(Ordering::Acquire) {
             if pause.load(Ordering::Acquire) {

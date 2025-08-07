@@ -1,7 +1,7 @@
 use crate::{
     types::{
         config::{AudioEncoder, QualityPreset, VideoEncoder},
-        error::{Result, WaycapError},
+        error::Result,
     },
     Capture,
 };
@@ -78,11 +78,7 @@ impl CaptureBuilder {
         let audio_encoder = if self.include_audio {
             match self.audio_encoder {
                 Some(enc) => enc,
-                None => {
-                    return Err(WaycapError::Init(
-                        "Include audio specified but no audio encoder chosen.".to_string(),
-                    ))
-                }
+                None => AudioEncoder::Opus,
             }
         } else {
             AudioEncoder::Opus

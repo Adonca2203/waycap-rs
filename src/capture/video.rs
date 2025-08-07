@@ -5,7 +5,6 @@ use std::{
         mpsc::{self},
         Arc,
     },
-    time::Instant,
 };
 
 use crossbeam::channel::Sender;
@@ -20,6 +19,7 @@ use pipewire::{
         utils::{Choice, ChoiceEnum, ChoiceFlags, Direction},
     },
     stream::{Stream, StreamFlags, StreamListener, StreamState},
+    sys::pw_stream_get_nsec,
 };
 use pw::{properties::properties, spa};
 
@@ -83,7 +83,6 @@ impl VideoCapture {
         audio_ready: Arc<AtomicBool>,
         use_nvidia_modifiers: bool,
         saving: Arc<AtomicBool>,
-        start_time: Instant,
         resolution_sender: mpsc::Sender<Resolution>,
         frame_tx: Sender<RawVideoFrame>,
         termination_recv: pw::channel::Receiver<Terminate>,
@@ -100,7 +99,6 @@ impl VideoCapture {
             &audio_ready,
             &saving,
             resolution_sender.clone(),
-            start_time,
             frame_tx.clone(),
         )?;
         Self::connect_stream(&mut stream, stream_node, use_nvidia_modifiers)?;
@@ -150,7 +148,6 @@ impl VideoCapture {
         audio_ready: &Arc<AtomicBool>,
         saving: &Arc<AtomicBool>,
         resolution_sender: mpsc::Sender<Resolution>,
-        start_time: Instant,
         frame_tx: Sender<RawVideoFrame>,
     ) -> Result<StreamListener<UserData>> {
         let ready_clone = Arc::clone(video_ready);
@@ -237,15 +234,13 @@ impl VideoCapture {
                             return;
                         }
 
-                        let time_us = start_time.elapsed().as_micros() as i64;
-
                         let data = &mut datas[0];
 
                         let fd = Self::get_dmabuf_fd(data);
 
                         match frame_tx.try_send(RawVideoFrame {
                             data: data.data().unwrap_or_default().to_vec(),
-                            timestamp: time_us,
+                            timestamp: unsafe { pw_stream_get_nsec(stream.as_raw_ptr())} as i64,
                             dmabuf_fd: fd,
                             stride: data.chunk().stride(),
                             offset: data.chunk().offset(),
@@ -415,7 +410,7 @@ impl VideoCapture {
         stream.connect(
             Direction::Input,
             Some(stream_node),
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
             &mut video_params,
         )?;
 

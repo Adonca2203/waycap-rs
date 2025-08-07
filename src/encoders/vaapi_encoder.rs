@@ -12,10 +12,13 @@ use ffmpeg_next::{
     Rational,
 };
 
-use crate::types::{
-    config::QualityPreset,
-    error::{Result, WaycapError},
-    video_frame::{EncodedVideoFrame, RawVideoFrame},
+use crate::{
+    types::{
+        config::QualityPreset,
+        error::{Result, WaycapError},
+        video_frame::{EncodedVideoFrame, RawVideoFrame},
+    },
+    utils::TIME_UNIT_NS,
 };
 
 use super::video::{create_hw_device, create_hw_frame_ctx, VideoEncoder, GOP_SIZE};
@@ -250,7 +253,7 @@ impl VaapiEncoder {
         }
 
         // These should be part of a config file
-        encoder_ctx.set_time_base(Rational::new(1, 1_000_000));
+        encoder_ctx.set_time_base(Rational::new(1, TIME_UNIT_NS as i32));
 
         // Needed to insert I-Frames more frequently so we don't lose full seconds
         // when popping frames from the front
@@ -265,7 +268,7 @@ impl VaapiEncoder {
         Ok(encoder)
     }
 
-    fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary {
+    fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary<'_>{
         let mut opts = ffmpeg::Dictionary::new();
         opts.set("vsync", "vfr");
         opts.set("rc", "VBR");

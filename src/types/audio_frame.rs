@@ -9,5 +9,6 @@ pub struct EncodedAudioFrame {
 #[derive(Debug)]
 pub struct RawAudioFrame {
     pub samples: Vec<f32>,
+    /// Capture timestamp in micro seconds
     pub timestamp: i64,
 }

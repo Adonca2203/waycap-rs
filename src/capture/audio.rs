@@ -1,7 +1,6 @@
 use std::{
     process::Command,
     sync::{atomic::AtomicBool, Arc},
-    time::Instant,
 };
 
 use crate::types::audio_frame::RawAudioFrame;
@@ -18,6 +17,7 @@ use pipewire::{
         utils::Direction,
     },
     stream::{StreamFlags, StreamState},
+    sys::pw_stream_get_nsec,
 };
 
 use super::Terminate;
@@ -44,7 +44,6 @@ impl AudioCapture {
     pub fn run(
         &self,
         audio_sender: Sender<RawAudioFrame>,
-        start_time: Instant,
         termination_recv: pw::channel::Receiver<Terminate>,
         saving: Arc<AtomicBool>,
     ) -> Result<(), pw::Error> {
@@ -137,8 +136,6 @@ impl AudioCapture {
                         return;
                     }
 
-                    let time_us = start_time.elapsed().as_micros() as i64;
-
                     let data = &mut datas[0];
                     let n_samples = data.chunk().size() / (std::mem::size_of::<f32>()) as u32;
 
@@ -147,7 +144,7 @@ impl AudioCapture {
                         let audio_samples = &samples_f32[..n_samples as usize];
                         match audio_sender.try_send(RawAudioFrame {
                             samples: audio_samples.to_vec(),
-                            timestamp: time_us,
+                            timestamp: unsafe { pw_stream_get_nsec(stream.as_raw_ptr()) } as i64,
                         }) {
                             Ok(_) => {}
                             Err(crossbeam::channel::TrySendError::Full(frame)) => {

@@ -20,10 +20,13 @@ use ffmpeg_next::{
     Rational,
 };
 
-use crate::types::{
-    config::QualityPreset,
-    error::{Result, WaycapError},
-    video_frame::{EncodedVideoFrame, RawVideoFrame},
+use crate::{
+    types::{
+        config::QualityPreset,
+        error::{Result, WaycapError},
+        video_frame::{EncodedVideoFrame, RawVideoFrame},
+    },
+    utils::TIME_UNIT_NS,
 };
 
 use super::{
@@ -309,7 +312,7 @@ impl NvencEncoder {
             av_buffer_unref(&mut frame_ctx);
         }
 
-        encoder_ctx.set_time_base(Rational::new(1, 1_000_000));
+        encoder_ctx.set_time_base(Rational::new(1, TIME_UNIT_NS as i32));
         encoder_ctx.set_gop(GOP_SIZE);
 
         let encoder_params = ffmpeg::codec::Parameters::new();
@@ -322,7 +325,7 @@ impl NvencEncoder {
         Ok(encoder)
     }
 
-    fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary {
+    fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary<'_> {
         let mut opts = ffmpeg::Dictionary::new();
         opts.set("vsync", "vfr");
         opts.set("rc", "vbr");
