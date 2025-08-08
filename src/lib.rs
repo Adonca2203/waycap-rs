@@ -79,14 +79,14 @@ use types::{
 use utils::{calculate_dimensions, extract_dmabuf_planes};
 use waycap_egl::{EglContext, GpuVendor};
 
-use crate::utils::TIME_UNIT_NS;
-
 mod capture;
 mod encoders;
 pub mod pipeline;
 pub mod types;
 mod utils;
 mod waycap_egl;
+
+pub use utils::TIME_UNIT_NS;
 
 /// Target Screen Resolution
 pub struct Resolution {

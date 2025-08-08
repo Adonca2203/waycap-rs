@@ -1,6 +1,6 @@
 [package]
 name = "waycap-rs"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 authors = ["Adonis Carvajal <adonis.carvajal2203@gmail.com>"]
 description = "High-level Wayland screen capture library with hardware-accelerated encoding"

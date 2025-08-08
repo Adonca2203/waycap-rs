@@ -75,3 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved native A/V Sync by:
     - Changed how we internally handle timestamps:
         - We no longer use our own `Instant` and timekeep, instead we rely on pipewire's `pw_stream_get_nsec` method to give us an unified timestamps
+
+## [2.1.1] - 2025-08-07
+### Changed
+- Made time unit public
