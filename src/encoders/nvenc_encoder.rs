@@ -327,7 +327,7 @@ impl NvencEncoder {
 
     fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary<'_> {
         let mut opts = ffmpeg::Dictionary::new();
-        opts.set("vsync", "vfr");
+        opts.set("vsync", "cfr");
         opts.set("rc", "vbr");
         opts.set("tune", "hq");
         match quality {

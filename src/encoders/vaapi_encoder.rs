@@ -268,7 +268,7 @@ impl VaapiEncoder {
         Ok(encoder)
     }
 
-    fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary<'_>{
+    fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary<'_> {
         let mut opts = ffmpeg::Dictionary::new();
         opts.set("vsync", "vfr");
         opts.set("rc", "VBR");

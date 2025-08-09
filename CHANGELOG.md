@@ -79,3 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.1.1] - 2025-08-07
 ### Changed
 - Made time unit public
+
+## [2.1.2] - 2025-08-07
+### Changed
+- Timestamps are offset by the first captured timestamp automatically
+- Changed NVenc to use CBR isntead of VBR

@@ -72,6 +72,7 @@ struct PipewireState {
 #[derive(Clone, Copy, Default)]
 struct UserData {
     video_format: spa::param::video::VideoInfoRaw,
+    first_frame_offset: Option<i64>,
 }
 
 impl VideoCapture {
@@ -237,10 +238,17 @@ impl VideoCapture {
                         let data = &mut datas[0];
 
                         let fd = Self::get_dmabuf_fd(data);
+                        let mut timestamp = unsafe { pw_stream_get_nsec(stream.as_raw_ptr())} as i64;
+
+                        if udata.first_frame_offset.is_none() {
+                            udata.first_frame_offset = Some(timestamp);
+                        }
+
+                        timestamp = timestamp - udata.first_frame_offset.unwrap();
 
                         match frame_tx.try_send(RawVideoFrame {
                             data: data.data().unwrap_or_default().to_vec(),
-                            timestamp: unsafe { pw_stream_get_nsec(stream.as_raw_ptr())} as i64,
+                            timestamp,
                             dmabuf_fd: fd,
                             stride: data.chunk().stride(),
                             offset: data.chunk().offset(),

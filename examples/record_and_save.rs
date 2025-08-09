@@ -140,17 +140,11 @@ fn save_buffer(
 
     output.write_header()?;
 
-    let first_pts = video_buffer
-        .values()
-        .next()
-        .map(|frame| frame.pts)
-        .unwrap_or(0);
-
     // Write video
     for frame in video_buffer.values() {
         let mut packet = ffmpeg_next::codec::packet::Packet::copy(&frame.data);
-        packet.set_pts(Some(frame.pts - first_pts));
-        packet.set_dts(Some(frame.dts - first_pts));
+        packet.set_pts(Some(frame.pts));
+        packet.set_dts(Some(frame.dts));
 
         // 0 = Video
         // 1 = Audio
@@ -160,12 +154,11 @@ fn save_buffer(
         packet.write_interleaved(&mut output)?;
     }
 
-    let first_pts = audio_buffer.first().map(|f| f.pts).unwrap_or(0);
     // Write Audio
     for sample in audio_buffer {
         let mut packet = ffmpeg_next::codec::packet::Packet::copy(&sample.data);
-        packet.set_pts(Some(sample.pts - first_pts));
-        packet.set_dts(Some(sample.pts - first_pts));
+        packet.set_pts(Some(sample.pts));
+        packet.set_dts(Some(sample.pts));
 
         packet.set_stream(1);
 

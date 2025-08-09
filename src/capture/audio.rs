@@ -25,6 +25,7 @@ use super::Terminate;
 #[derive(Clone, Copy, Default)]
 struct UserData {
     audio_format: spa::param::audio::AudioInfoRaw,
+    first_frame_offset: Option<i64>,
 }
 
 pub struct AudioCapture {
@@ -121,7 +122,7 @@ impl AudioCapture {
                     udata.audio_format.format().as_raw()
                 );
             })
-            .process(move |stream, _| match stream.dequeue_buffer() {
+            .process(move |stream, udata| match stream.dequeue_buffer() {
                 None => log::debug!("Out of audio buffers"),
                 Some(mut buffer) => {
                     // Wait until video is streaming before we try to process
@@ -142,9 +143,17 @@ impl AudioCapture {
                     if let Some(samples) = data.data() {
                         let samples_f32: &[f32] = bytemuck::cast_slice(samples);
                         let audio_samples = &samples_f32[..n_samples as usize];
+                        let mut timestamp =
+                            unsafe { pw_stream_get_nsec(stream.as_raw_ptr()) } as i64;
+
+                        if udata.first_frame_offset.is_none() {
+                            udata.first_frame_offset = Some(timestamp);
+                        }
+
+                        timestamp = timestamp - udata.first_frame_offset.unwrap();
                         match audio_sender.try_send(RawAudioFrame {
                             samples: audio_samples.to_vec(),
-                            timestamp: unsafe { pw_stream_get_nsec(stream.as_raw_ptr()) } as i64,
+                            timestamp,
                         }) {
                             Ok(_) => {}
                             Err(crossbeam::channel::TrySendError::Full(frame)) => {
