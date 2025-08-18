@@ -71,7 +71,7 @@ impl AudioEncoder for OpusEncoder {
             let n_channels = encoder.channels() as usize;
             let total_samples = raw_frame.samples.len();
 
-            if total_samples % n_channels != 0 {
+            if !total_samples.is_multiple_of(n_channels) {
                 return Err(crate::types::error::WaycapError::FFmpeg(
                     ffmpeg::Error::InvalidData,
                 ));

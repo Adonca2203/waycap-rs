@@ -1,17 +1,6 @@
-use std::{
-    any::Any,
-    ptr::null_mut,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    time::Duration,
-};
+use std::{ptr::null_mut, time::Duration};
 
-use crossbeam::{
-    channel::{bounded, Receiver, Sender},
-    select,
-};
+use crossbeam::channel::{bounded, Receiver, Sender};
 use cust::{
     prelude::Context,
     sys::{
@@ -59,7 +48,7 @@ pub struct NvencEncoder {
 
     cuda_ctx: Context,
     graphics_resource: CUgraphicsResource,
-    egl_context: EglContext,
+    egl_context: Option<EglContext>,
     egl_texture: u32,
 }
 
@@ -91,8 +80,7 @@ impl RawProcessor for NvencEncoder {
     }
 
     fn process(&mut self, frame: &RawVideoFrame) -> Result<()> {
-        dbg!("Processing frame with nvenc");
-        match process_dmabuf_frame(&self.egl_context, &frame) {
+        match process_dmabuf_frame(self.egl_context.as_ref().unwrap(), frame) {
             Ok(img) => {
                 if let Some(ref mut encoder) = self.encoder {
                     let mut cuda_frame = ffmpeg::util::frame::Video::new(
@@ -201,14 +189,14 @@ impl RawProcessor for NvencEncoder {
                                 }
                                 Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
                                     log::error!(
-                                        "Cound not send encoded video frame. Receiver disconnected"
+                                        "Could not send encoded video frame. Receiver disconnected"
                                     );
                                 }
                             }
                         };
                     }
                 }
-                self.egl_context.destroy_image(img)?;
+                self.egl_context.as_ref().unwrap().destroy_image(img)?;
             }
             Err(e) => log::error!("Could not process dma buf frame: {e:?}"),
         }
@@ -216,7 +204,9 @@ impl RawProcessor for NvencEncoder {
     }
 
     fn thread_setup(&mut self) -> Result<()> {
+        self.egl_context = Some(EglContext::new(self.width as i32, self.height as i32)?);
         self.make_current()?;
+        self.init_gl(None)?;
         Ok(())
     }
 
@@ -253,14 +243,14 @@ fn process_dmabuf_frame(egl_ctx: &EglContext, raw_frame: &RawVideoFrame) -> Resu
 impl NvencEncoder {
     pub(crate) fn new(width: u32, height: u32, quality: QualityPreset) -> Result<Self> {
         let encoder_name = "h264_nvenc";
-        let egl_context = EglContext::new(width as i32, height as i32)?;
+
         let (frame_tx, frame_rx): (Sender<EncodedVideoFrame>, Receiver<EncodedVideoFrame>) =
             bounded(10);
         let cuda_ctx = cust::quick_init().unwrap();
 
         let encoder = Self::create_encoder(width, height, encoder_name, &quality, &cuda_ctx)?;
 
-        let mut _self = Self {
+        Ok(Self {
             encoder: Some(encoder),
             width,
             height,
@@ -270,12 +260,9 @@ impl NvencEncoder {
             encoded_frame_sender: frame_tx,
             cuda_ctx,
             graphics_resource: null_mut(),
-            egl_context,
+            egl_context: None,
             egl_texture: 0,
-        };
-
-        _self.init_gl(None)?;
-        Ok(_self)
+        })
     }
 
     fn create_encoder(
@@ -403,8 +390,11 @@ impl NvencEncoder {
         self.egl_texture = match texture_id {
             Some(texture_id) => texture_id,
             None => {
-                self.egl_context.create_persistent_texture()?;
-                self.egl_context.get_texture_id().unwrap()
+                self.egl_context
+                    .as_ref()
+                    .unwrap()
+                    .create_persistent_texture()?;
+                self.egl_context.as_ref().unwrap().get_texture_id().unwrap()
             }
         };
 
@@ -440,8 +430,6 @@ impl NvencEncoder {
     /// Set cuda and egl context to current thread
     pub fn make_current(&self) -> Result<()> {
         unsafe { cuCtxSetCurrent(self.cuda_ctx.as_raw()) };
-        self.egl_context.release_current()?;
-        self.egl_context.make_current()?;
         Ok(())
     }
 }
@@ -453,6 +441,7 @@ impl Drop for NvencEncoder {
         }
         self.drop_processor();
 
+        self.egl_context.as_ref().unwrap().make_current().unwrap();
         if let Err(e) = self.make_current() {
             log::error!("Could not make context current during drop: {e:?}");
         }

@@ -1,14 +1,6 @@
-use std::{
-    any::Any,
-    ptr::null_mut,
-    sync::{atomic::Ordering, Arc, Mutex},
-    time::Duration,
-};
+use std::ptr::null_mut;
 
-use crossbeam::{
-    channel::{bounded, Receiver, Sender},
-    select,
-};
+use crossbeam::channel::{bounded, Receiver, Sender};
 use drm_fourcc::DrmFourcc;
 use ffmpeg_next::{
     self as ffmpeg,
@@ -67,7 +59,6 @@ impl RawProcessor for VaapiEncoder {
     }
 
     fn process(&mut self, frame: &RawVideoFrame) -> Result<()> {
-        dbg!("Processing frame with Vaapi");
         if let Some(ref mut encoder) = self.encoder {
             if let Some(fd) = frame.dmabuf_fd {
                 let mut drm_frame = ffmpeg::util::frame::Video::new(

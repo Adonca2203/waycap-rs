@@ -1,75 +1,23 @@
-use std::any::Any;
 use std::ffi::CString;
-use std::os::unix::thread;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::types::error::{Result, WaycapError};
 use crate::types::video_frame::RawVideoFrame;
-use crate::types::{config::QualityPreset, video_frame::EncodedVideoFrame};
 use crate::TIME_UNIT_NS;
 use crossbeam::channel::Receiver;
 use crossbeam::select;
 use ffmpeg::ffi::{av_hwdevice_ctx_create, av_hwframe_ctx_alloc, AVBufferRef};
 use ffmpeg_next::{self as ffmpeg};
+use std::sync::Mutex;
 
 pub const GOP_SIZE: u32 = 30;
 
 pub trait RawProcessor: Send {
     type Output;
-    fn start(
-        self,
-        input: Receiver<RawVideoFrame>,
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        target_fps: u64,
-    ) -> (
-        std::sync::Arc<std::sync::Mutex<Self>>,
-        std::thread::JoinHandle<Result<()>>,
-    )
-    where
-        Self: Sized + 'static,
-    {
-        let returned_self = Arc::new(Mutex::new(self));
-        let thread_self = Arc::clone(&returned_self);
-
-        let handle = std::thread::spawn(move || -> Result<()> {
-            let mut last_timestamp: u64 = 0;
-            let frame_interval = TIME_UNIT_NS / target_fps;
-            thread_self.lock().unwrap().thread_setup()?;
-
-            while !stop.load(Ordering::Acquire) {
-                if pause.load(Ordering::Acquire) {
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-                select! {
-                    recv(input) -> raw_frame => {
-                        match raw_frame {
-                            Ok(raw_frame) => {
-                                let current_time = raw_frame.timestamp as u64;
-                                if current_time >= last_timestamp + frame_interval {
-                                    thread_self.lock().unwrap().process(&raw_frame)?;
-                                    last_timestamp = current_time;
-                                }
-                            }
-                            Err(_) => {
-                                log::info!("Video channel disconnected");
-                                break;
-                            }
-                        }
-                    }
-                    default(Duration::from_millis(100)) => {
-                        // Timeout to check stop/pause flags periodically
-                    }
-                }
-            }
-            Ok(())
-        });
-        (returned_self, handle)
-    }
     /// Process a single raw frame
     /// this is called from inside the thread started by self.start
     fn process(&mut self, frame: &RawVideoFrame) -> Result<()>;
@@ -78,11 +26,67 @@ pub trait RawProcessor: Send {
     fn thread_setup(&mut self) -> Result<()> {
         Ok(())
     }
+    /// teardown inside the thread, before the main loop
+    /// Cuda needs this, but others might not
+    fn thread_teardown(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn reset(&mut self) -> Result<()>;
     fn output(&mut self) -> Option<Receiver<Self::Output>>;
     fn drop_processor(&mut self);
     fn drain(&mut self) -> Result<()>;
     fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video>;
+}
+
+pub(crate) fn start_video_loop<T>(
+    processor: T,
+    input: Receiver<RawVideoFrame>,
+    stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
+    target_fps: u64,
+) -> (Arc<Mutex<T>>, JoinHandle<Result<()>>)
+where
+    T: RawProcessor + Sized + 'static,
+{
+    let returned_self = Arc::new(Mutex::new(processor));
+    let thread_self = Arc::clone(&returned_self);
+
+    let handle = std::thread::spawn(move || -> Result<()> {
+        let mut last_timestamp: u64 = 0;
+        let frame_interval = TIME_UNIT_NS / target_fps;
+
+        thread_self.lock().unwrap().thread_setup()?;
+
+        while !stop.load(Ordering::Acquire) {
+            if pause.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            select! {
+                recv(input) -> raw_frame => {
+                    match raw_frame {
+                        Ok(raw_frame) => {
+                            let current_time = raw_frame.timestamp as u64;
+                            if current_time >= last_timestamp + frame_interval {
+                                thread_self.lock().unwrap().process(&raw_frame)?;
+                                last_timestamp = current_time;
+                            }
+                        }
+                        Err(_) => {
+                            log::info!("Video channel disconnected");
+                            break;
+                        }
+                    }
+                }
+                default(Duration::from_millis(100)) => {
+                    // Timeout to check stop/pause flags periodically
+                }
+            }
+        }
+        thread_self.lock().unwrap().thread_teardown()?;
+        Ok(())
+    });
+    (returned_self, handle)
 }
 
 pub fn create_hw_frame_ctx(device: *mut AVBufferRef) -> Result<*mut AVBufferRef> {

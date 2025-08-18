@@ -51,11 +51,10 @@
 
 #![warn(clippy::all)]
 use std::{
-    marker::PhantomData,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self},
-        Arc, Mutex,
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -65,11 +64,9 @@ use crossbeam::{
     channel::{bounded, Receiver, Sender},
     select,
 };
-use encoders::{
-    audio::AudioEncoder, nvenc_encoder::NvencEncoder, opus_encoder::OpusEncoder,
-    vaapi_encoder::VaapiEncoder,
-};
+use encoders::{audio::AudioEncoder, opus_encoder::OpusEncoder};
 use portal_screencast_waycap::{CursorMode, ScreenCast, SourceType};
+use std::sync::Mutex;
 use types::{
     audio_frame::{EncodedAudioFrame, RawAudioFrame},
     config::{AudioEncoder as AudioEncoderType, QualityPreset, VideoEncoder as VideoEncoderType},
@@ -89,6 +86,7 @@ pub use encoders::video::RawProcessor;
 pub use utils::TIME_UNIT_NS;
 
 pub use crate::encoders::dynamic_encoder::DynamicEncoder;
+use crate::encoders::video::start_video_loop;
 
 /// Target Screen Resolution
 pub struct Resolution {
@@ -354,7 +352,8 @@ impl Capture<DynamicEncoder> {
             _self.worker_handles.push(audio_loop);
         }
 
-        let (video_encoder, video_loop) = video_encoder.start(
+        let (video_encoder, video_loop) = start_video_loop(
+            video_encoder,
             frame_rx,
             Arc::clone(&_self.stop_flag),
             Arc::clone(&_self.pause_flag),
@@ -453,6 +452,7 @@ impl Capture<DynamicEncoder> {
         F: FnOnce(&Option<ffmpeg_next::encoder::Audio>) -> R,
     {
         assert!(self.audio_encoder.is_some());
+
         let guard = self.audio_encoder.as_ref().unwrap().lock().unwrap();
         f(guard.get_encoder())
     }

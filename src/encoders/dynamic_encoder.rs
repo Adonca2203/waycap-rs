@@ -58,4 +58,7 @@ impl RawProcessor for DynamicEncoder {
     fn get_encoder(&self) -> &Option<encoder::Video> {
         self.0.get_encoder()
     }
+    fn thread_setup(&mut self) -> Result<()> {
+        self.0.thread_setup()
+    }
 }
