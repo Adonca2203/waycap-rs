@@ -1,6 +1,14 @@
-use std::{any::Any, ptr::null_mut};
+use std::{
+    any::Any,
+    ptr::null_mut,
+    sync::{atomic::Ordering, Arc, Mutex},
+    time::Duration,
+};
 
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::{
+    channel::{bounded, Receiver, Sender},
+    select,
+};
 use drm_fourcc::DrmFourcc;
 use ffmpeg_next::{
     self as ffmpeg,
@@ -13,6 +21,7 @@ use ffmpeg_next::{
 };
 
 use crate::{
+    encoders::video::RawProcessor,
     types::{
         config::QualityPreset,
         error::{Result, WaycapError},
@@ -21,7 +30,7 @@ use crate::{
     utils::TIME_UNIT_NS,
 };
 
-use super::video::{create_hw_device, create_hw_frame_ctx, VideoEncoder, GOP_SIZE};
+use super::video::{create_hw_device, create_hw_frame_ctx, GOP_SIZE};
 
 pub struct VaapiEncoder {
     encoder: Option<ffmpeg::codec::encoder::Video>,
@@ -34,35 +43,31 @@ pub struct VaapiEncoder {
     filter_graph: Option<ffmpeg::filter::Graph>,
 }
 
-impl VideoEncoder for VaapiEncoder {
-    fn new(width: u32, height: u32, quality: QualityPreset) -> Result<Self>
-    where
-        Self: Sized,
-    {
-        let encoder_name = "h264_vaapi";
-        let encoder = Self::create_encoder(width, height, encoder_name, &quality)?;
+impl RawProcessor for VaapiEncoder {
+    type Output = EncodedVideoFrame;
+    fn reset(&mut self) -> Result<()> {
+        self.drop_processor();
+        let new_encoder =
+            Self::create_encoder(self.width, self.height, &self.encoder_name, &self.quality)?;
 
-        let (frame_tx, frame_rx): (Sender<EncodedVideoFrame>, Receiver<EncodedVideoFrame>) =
-            bounded(10);
-        let filter_graph = Some(Self::create_filter_graph(&encoder, width, height)?);
+        let new_filter_graph = Self::create_filter_graph(&new_encoder, self.width, self.height)?;
 
-        Ok(Self {
-            encoder: Some(encoder),
-            width,
-            height,
-            encoder_name: encoder_name.to_string(),
-            quality,
-            encoded_frame_recv: Some(frame_rx),
-            encoded_frame_sender: frame_tx,
-            filter_graph,
-        })
+        self.encoder = Some(new_encoder);
+        self.filter_graph = Some(new_filter_graph);
+        Ok(())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn drop_processor(&mut self) {
+        self.encoder.take();
+        self.filter_graph.take();
+    }
+
+    fn output(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
+        self.encoded_frame_recv.clone()
     }
 
     fn process(&mut self, frame: &RawVideoFrame) -> Result<()> {
+        dbg!("Processing frame with Vaapi");
         if let Some(ref mut encoder) = self.encoder {
             if let Some(fd) = frame.dmabuf_fd {
                 let mut drm_frame = ffmpeg::util::frame::Video::new(
@@ -141,7 +146,7 @@ impl VideoEncoder for VaapiEncoder {
                         }
                         Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
                             log::error!(
-                                "Cound not send encoded video frame. Receiver disconnected"
+                                "Could not send encoded video frame. Receiver disconnected"
                             );
                         }
                     }
@@ -150,7 +155,6 @@ impl VideoEncoder for VaapiEncoder {
         }
         Ok(())
     }
-
     /// Drain the filter graph and encoder of any remaining frames it is processing
     fn drain(&mut self) -> Result<()> {
         if let Some(ref mut encoder) = self.encoder {
@@ -176,34 +180,32 @@ impl VideoEncoder for VaapiEncoder {
         }
         Ok(())
     }
-
-    fn reset(&mut self) -> Result<()> {
-        self.drop_encoder();
-        let new_encoder =
-            Self::create_encoder(self.width, self.height, &self.encoder_name, &self.quality)?;
-
-        let new_filter_graph = Self::create_filter_graph(&new_encoder, self.width, self.height)?;
-
-        self.encoder = Some(new_encoder);
-        self.filter_graph = Some(new_filter_graph);
-        Ok(())
-    }
-
     fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video> {
         &self.encoder
-    }
-
-    fn drop_encoder(&mut self) {
-        self.encoder.take();
-        self.filter_graph.take();
-    }
-
-    fn get_encoded_recv(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
-        self.encoded_frame_recv.clone()
     }
 }
 
 impl VaapiEncoder {
+    pub(crate) fn new(width: u32, height: u32, quality: QualityPreset) -> Result<Self> {
+        let encoder_name = "h264_vaapi";
+        let encoder = Self::create_encoder(width, height, encoder_name, &quality)?;
+
+        let (frame_tx, frame_rx): (Sender<EncodedVideoFrame>, Receiver<EncodedVideoFrame>) =
+            bounded(10);
+        let filter_graph = Some(Self::create_filter_graph(&encoder, width, height)?);
+
+        Ok(Self {
+            encoder: Some(encoder),
+            width,
+            height,
+            encoder_name: encoder_name.to_string(),
+            quality,
+            encoded_frame_recv: Some(frame_rx),
+            encoded_frame_sender: frame_tx,
+            filter_graph,
+        })
+    }
+
     fn create_encoder(
         width: u32,
         height: u32,
@@ -268,7 +270,7 @@ impl VaapiEncoder {
         Ok(encoder)
     }
 
-    fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary<'_>{
+    fn get_encoder_params(quality: &QualityPreset) -> ffmpeg::Dictionary<'_> {
         let mut opts = ffmpeg::Dictionary::new();
         opts.set("vsync", "vfr");
         opts.set("rc", "VBR");
@@ -336,6 +338,6 @@ impl Drop for VaapiEncoder {
         if let Err(e) = self.drain() {
             log::error!("Error while draining vaapi encoder during drop: {e:?}");
         }
-        self.drop_encoder();
+        self.drop_processor();
     }
 }

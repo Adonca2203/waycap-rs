@@ -1,15 +1,15 @@
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum VideoEncoder {
     H264Nvenc,
     H264Vaapi,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum AudioEncoder {
     Opus,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum QualityPreset {
     Low,
     Medium,

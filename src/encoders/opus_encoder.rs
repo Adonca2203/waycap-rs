@@ -117,7 +117,7 @@ impl AudioEncoder for OpusEncoder {
                             }
                             Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
                                 log::error!(
-                                    "Cound not send encoded audio frame. Receiver disconnected"
+                                    "Could not send encoded audio frame. Receiver disconnected"
                                 );
                             }
                         }

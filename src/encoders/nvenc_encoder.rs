@@ -1,6 +1,17 @@
-use std::{any::Any, ptr::null_mut};
+use std::{
+    any::Any,
+    ptr::null_mut,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
 
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::{
+    channel::{bounded, Receiver, Sender},
+    select,
+};
 use cust::{
     prelude::Context,
     sys::{
@@ -21,17 +32,20 @@ use ffmpeg_next::{
 };
 
 use crate::{
+    encoders::video::RawProcessor,
     types::{
         config::QualityPreset,
         error::{Result, WaycapError},
         video_frame::{EncodedVideoFrame, RawVideoFrame},
     },
-    utils::TIME_UNIT_NS,
+    utils::{calculate_dimensions, extract_dmabuf_planes, TIME_UNIT_NS},
+    waycap_egl::EglContext,
 };
+use khronos_egl::Image;
 
 use super::{
     cuda::{cuGraphicsGLRegisterImage, AVCUDADeviceContext},
-    video::{create_hw_frame_ctx, VideoEncoder, GOP_SIZE},
+    video::{create_hw_frame_ctx, GOP_SIZE},
 };
 
 pub struct NvencEncoder {
@@ -45,154 +59,164 @@ pub struct NvencEncoder {
 
     cuda_ctx: Context,
     graphics_resource: CUgraphicsResource,
+    egl_context: EglContext,
     egl_texture: u32,
 }
 
 unsafe impl Send for NvencEncoder {}
 unsafe impl Sync for NvencEncoder {}
 
-impl VideoEncoder for NvencEncoder {
-    fn new(width: u32, height: u32, quality: QualityPreset) -> Result<Self>
-    where
-        Self: Sized,
-    {
-        let encoder_name = "h264_nvenc";
+impl RawProcessor for NvencEncoder {
+    type Output = EncodedVideoFrame;
+    fn reset(&mut self) -> Result<()> {
+        self.drop_processor();
+        let new_encoder = Self::create_encoder(
+            self.width,
+            self.height,
+            &self.encoder_name,
+            &self.quality,
+            &self.cuda_ctx,
+        )?;
 
-        let (frame_tx, frame_rx): (Sender<EncodedVideoFrame>, Receiver<EncodedVideoFrame>) =
-            bounded(10);
-        let cuda_ctx = cust::quick_init().unwrap();
-
-        let encoder = Self::create_encoder(width, height, encoder_name, &quality, &cuda_ctx)?;
-
-        Ok(Self {
-            encoder: Some(encoder),
-            width,
-            height,
-            encoder_name: encoder_name.to_string(),
-            quality,
-            encoded_frame_recv: Some(frame_rx),
-            encoded_frame_sender: frame_tx,
-            cuda_ctx,
-            graphics_resource: null_mut(),
-            egl_texture: 0,
-        })
+        self.encoder = Some(new_encoder);
+        Ok(())
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn drop_processor(&mut self) {
+        self.encoder.take();
+    }
+
+    fn output(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
+        self.encoded_frame_recv.clone()
     }
 
     fn process(&mut self, frame: &RawVideoFrame) -> Result<()> {
-        if let Some(ref mut encoder) = self.encoder {
-            let mut cuda_frame = ffmpeg::util::frame::Video::new(
-                ffmpeg_next::format::Pixel::CUDA,
-                encoder.width(),
-                encoder.height(),
-            );
+        dbg!("Processing frame with nvenc");
+        match process_dmabuf_frame(&self.egl_context, &frame) {
+            Ok(img) => {
+                if let Some(ref mut encoder) = self.encoder {
+                    let mut cuda_frame = ffmpeg::util::frame::Video::new(
+                        ffmpeg_next::format::Pixel::CUDA,
+                        encoder.width(),
+                        encoder.height(),
+                    );
 
-            unsafe {
-                let ret = av_hwframe_get_buffer(
-                    (*encoder.as_ptr()).hw_frames_ctx,
-                    cuda_frame.as_mut_ptr(),
-                    0,
-                );
-                if ret < 0 {
-                    return Err(WaycapError::Encoding(format!(
-                        "Failed to allocate CUDA frame buffer: {ret}",
-                    )));
-                }
-
-                let result = cuGraphicsMapResources(1, &mut self.graphics_resource, null_mut());
-                if result != CUresult::CUDA_SUCCESS {
-                    gl::BindTexture(gl::TEXTURE_2D, 0);
-                    return Err(WaycapError::Encoding(format!(
-                        "Error mapping GL image to CUDA: {result:?}",
-                    )));
-                }
-
-                let mut cuda_array: CUarray = null_mut();
-
-                let result = cuGraphicsSubResourceGetMappedArray(
-                    &mut cuda_array,
-                    self.graphics_resource,
-                    0,
-                    0,
-                );
-                if result != CUresult::CUDA_SUCCESS {
-                    cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
-                    gl::BindTexture(gl::TEXTURE_2D, 0);
-                    return Err(WaycapError::Encoding(format!(
-                        "Error getting CUDA Array: {result:?}",
-                    )));
-                }
-
-                let copy_params = CUDA_MEMCPY2D_v2 {
-                    srcMemoryType: CUmemorytype::CU_MEMORYTYPE_ARRAY,
-                    srcArray: cuda_array,
-                    srcXInBytes: 0,
-                    srcY: 0,
-                    srcHost: std::ptr::null(),
-                    srcDevice: 0,
-                    srcPitch: 0,
-
-                    dstMemoryType: CUmemorytype::CU_MEMORYTYPE_DEVICE,
-                    dstDevice: (*cuda_frame.as_ptr()).data[0] as CUdeviceptr,
-                    dstPitch: (*cuda_frame.as_ptr()).linesize[0] as usize,
-                    dstXInBytes: 0,
-                    dstY: 0,
-                    dstHost: std::ptr::null_mut(),
-                    dstArray: std::ptr::null_mut(),
-
-                    // RGBA is 4 bytes per pixel
-                    WidthInBytes: (encoder.width() * 4) as usize,
-                    Height: encoder.height() as usize,
-                };
-
-                let result = cuMemcpy2D_v2(&copy_params);
-                if result != CUresult::CUDA_SUCCESS {
-                    cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
-                    gl::BindTexture(gl::TEXTURE_2D, 0);
-                    return Err(WaycapError::Encoding(format!(
-                        "Error mapping cuda frame: {result:?}",
-                    )));
-                }
-
-                // Cleanup
-                let result = cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
-                if result != CUresult::CUDA_SUCCESS {
-                    return Err(WaycapError::Encoding(format!(
-                        "Could not unmap resource: {result:?}",
-                    )));
-                }
-
-                gl::BindTexture(gl::TEXTURE_2D, 0);
-            }
-
-            cuda_frame.set_pts(Some(frame.timestamp));
-            encoder.send_frame(&cuda_frame)?;
-
-            let mut packet = ffmpeg::codec::packet::Packet::empty();
-            if encoder.receive_packet(&mut packet).is_ok() {
-                if let Some(data) = packet.data() {
-                    match self.encoded_frame_sender.try_send(EncodedVideoFrame {
-                        data: data.to_vec(),
-                        is_keyframe: packet.is_key(),
-                        pts: packet.pts().unwrap_or(0),
-                        dts: packet.dts().unwrap_or(0),
-                    }) {
-                        Ok(_) => {}
-                        Err(crossbeam::channel::TrySendError::Full(_)) => {
-                            log::error!("Could not send encoded video frame. Receiver is full");
+                    unsafe {
+                        let ret = av_hwframe_get_buffer(
+                            (*encoder.as_ptr()).hw_frames_ctx,
+                            cuda_frame.as_mut_ptr(),
+                            0,
+                        );
+                        if ret < 0 {
+                            return Err(WaycapError::Encoding(format!(
+                                "Failed to allocate CUDA frame buffer: {ret}",
+                            )));
                         }
-                        Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
-                            log::error!(
-                                "Cound not send encoded video frame. Receiver disconnected"
-                            );
+
+                        let result =
+                            cuGraphicsMapResources(1, &mut self.graphics_resource, null_mut());
+                        if result != CUresult::CUDA_SUCCESS {
+                            gl::BindTexture(gl::TEXTURE_2D, 0);
+                            return Err(WaycapError::Encoding(format!(
+                                "Error mapping GL image to CUDA: {result:?}",
+                            )));
                         }
+
+                        let mut cuda_array: CUarray = null_mut();
+
+                        let result = cuGraphicsSubResourceGetMappedArray(
+                            &mut cuda_array,
+                            self.graphics_resource,
+                            0,
+                            0,
+                        );
+                        if result != CUresult::CUDA_SUCCESS {
+                            cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
+                            gl::BindTexture(gl::TEXTURE_2D, 0);
+                            return Err(WaycapError::Encoding(format!(
+                                "Error getting CUDA Array: {result:?}",
+                            )));
+                        }
+
+                        let copy_params = CUDA_MEMCPY2D_v2 {
+                            srcMemoryType: CUmemorytype::CU_MEMORYTYPE_ARRAY,
+                            srcArray: cuda_array,
+                            srcXInBytes: 0,
+                            srcY: 0,
+                            srcHost: std::ptr::null(),
+                            srcDevice: 0,
+                            srcPitch: 0,
+
+                            dstMemoryType: CUmemorytype::CU_MEMORYTYPE_DEVICE,
+                            dstDevice: (*cuda_frame.as_ptr()).data[0] as CUdeviceptr,
+                            dstPitch: (*cuda_frame.as_ptr()).linesize[0] as usize,
+                            dstXInBytes: 0,
+                            dstY: 0,
+                            dstHost: std::ptr::null_mut(),
+                            dstArray: std::ptr::null_mut(),
+
+                            // RGBA is 4 bytes per pixel
+                            WidthInBytes: (encoder.width() * 4) as usize,
+                            Height: encoder.height() as usize,
+                        };
+
+                        let result = cuMemcpy2D_v2(&copy_params);
+                        if result != CUresult::CUDA_SUCCESS {
+                            cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
+                            gl::BindTexture(gl::TEXTURE_2D, 0);
+                            return Err(WaycapError::Encoding(format!(
+                                "Error mapping cuda frame: {result:?}",
+                            )));
+                        }
+
+                        // Cleanup
+                        let result =
+                            cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
+                        if result != CUresult::CUDA_SUCCESS {
+                            return Err(WaycapError::Encoding(format!(
+                                "Could not unmap resource: {result:?}",
+                            )));
+                        }
+
+                        gl::BindTexture(gl::TEXTURE_2D, 0);
                     }
-                };
+
+                    cuda_frame.set_pts(Some(frame.timestamp));
+                    encoder.send_frame(&cuda_frame)?;
+
+                    let mut packet = ffmpeg::codec::packet::Packet::empty();
+                    if encoder.receive_packet(&mut packet).is_ok() {
+                        if let Some(data) = packet.data() {
+                            match self.encoded_frame_sender.try_send(EncodedVideoFrame {
+                                data: data.to_vec(),
+                                is_keyframe: packet.is_key(),
+                                pts: packet.pts().unwrap_or(0),
+                                dts: packet.dts().unwrap_or(0),
+                            }) {
+                                Ok(_) => {}
+                                Err(crossbeam::channel::TrySendError::Full(_)) => {
+                                    log::error!(
+                                        "Could not send encoded video frame. Receiver is full"
+                                    );
+                                }
+                                Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+                                    log::error!(
+                                        "Cound not send encoded video frame. Receiver disconnected"
+                                    );
+                                }
+                            }
+                        };
+                    }
+                }
+                self.egl_context.destroy_image(img)?;
             }
+            Err(e) => log::error!("Could not process dma buf frame: {e:?}"),
         }
+        Ok(())
+    }
+
+    fn thread_setup(&mut self) -> Result<()> {
+        self.make_current()?;
         Ok(())
     }
 
@@ -206,34 +230,54 @@ impl VideoEncoder for NvencEncoder {
         Ok(())
     }
 
-    fn reset(&mut self) -> Result<()> {
-        self.drop_encoder();
-        let new_encoder = Self::create_encoder(
-            self.width,
-            self.height,
-            &self.encoder_name,
-            &self.quality,
-            &self.cuda_ctx,
-        )?;
-
-        self.encoder = Some(new_encoder);
-        Ok(())
-    }
-
     fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video> {
         &self.encoder
     }
+}
 
-    fn drop_encoder(&mut self) {
-        self.encoder.take();
-    }
+fn process_dmabuf_frame(egl_ctx: &EglContext, raw_frame: &RawVideoFrame) -> Result<Image> {
+    let dma_buf_planes = extract_dmabuf_planes(raw_frame)?;
 
-    fn get_encoded_recv(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
-        self.encoded_frame_recv.clone()
-    }
+    let format = drm_fourcc::DrmFourcc::Argb8888 as u32;
+    let (width, height) = calculate_dimensions(raw_frame)?;
+    let modifier = raw_frame.modifier;
+
+    let egl_image =
+        egl_ctx.create_image_from_dmabuf(&dma_buf_planes, format, width, height, modifier)?;
+
+    egl_ctx.update_texture_from_image(egl_image)?;
+
+    Ok(egl_image)
 }
 
 impl NvencEncoder {
+    pub(crate) fn new(width: u32, height: u32, quality: QualityPreset) -> Result<Self> {
+        let encoder_name = "h264_nvenc";
+        let egl_context = EglContext::new(width as i32, height as i32)?;
+        let (frame_tx, frame_rx): (Sender<EncodedVideoFrame>, Receiver<EncodedVideoFrame>) =
+            bounded(10);
+        let cuda_ctx = cust::quick_init().unwrap();
+
+        let encoder = Self::create_encoder(width, height, encoder_name, &quality, &cuda_ctx)?;
+
+        let mut _self = Self {
+            encoder: Some(encoder),
+            width,
+            height,
+            encoder_name: encoder_name.to_string(),
+            quality,
+            encoded_frame_recv: Some(frame_rx),
+            encoded_frame_sender: frame_tx,
+            cuda_ctx,
+            graphics_resource: null_mut(),
+            egl_context,
+            egl_texture: 0,
+        };
+
+        _self.init_gl(None)?;
+        Ok(_self)
+    }
+
     fn create_encoder(
         width: u32,
         height: u32,
@@ -355,9 +399,16 @@ impl NvencEncoder {
         opts
     }
 
-    pub fn init_gl(&mut self, texture_id: u32) -> Result<()> {
+    pub fn init_gl(&mut self, texture_id: Option<u32>) -> Result<()> {
+        self.egl_texture = match texture_id {
+            Some(texture_id) => texture_id,
+            None => {
+                self.egl_context.create_persistent_texture()?;
+                self.egl_context.get_texture_id().unwrap()
+            }
+        };
+
         unsafe {
-            self.egl_texture = texture_id;
             // Try to register GL texture with CUDA
             let result = cuGraphicsGLRegisterImage(
                 &mut self.graphics_resource,
@@ -386,8 +437,11 @@ impl NvencEncoder {
         Ok(())
     }
 
+    /// Set cuda and egl context to current thread
     pub fn make_current(&self) -> Result<()> {
         unsafe { cuCtxSetCurrent(self.cuda_ctx.as_raw()) };
+        self.egl_context.release_current()?;
+        self.egl_context.make_current()?;
         Ok(())
     }
 }
@@ -397,7 +451,7 @@ impl Drop for NvencEncoder {
         if let Err(e) = self.drain() {
             log::error!("Error while draining nvenc encoder during drop: {e:?}");
         }
-        self.drop_encoder();
+        self.drop_processor();
 
         if let Err(e) = self.make_current() {
             log::error!("Could not make context current during drop: {e:?}");

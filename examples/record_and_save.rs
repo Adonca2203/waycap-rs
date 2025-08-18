@@ -12,7 +12,7 @@ use waycap_rs::{
         error::Result,
         video_frame::EncodedVideoFrame,
     },
-    Capture,
+    Capture, DynamicEncoder,
 };
 
 fn main() -> Result<()> {
@@ -116,7 +116,7 @@ fn save_buffer(
     filename: &str,
     video_buffer: &BTreeMap<i64, EncodedVideoFrame>,
     audio_buffer: &Vec<EncodedAudioFrame>,
-    capture: &Capture,
+    capture: &Capture<DynamicEncoder>,
 ) -> Result<()> {
     let mut output = ffmpeg_next::format::output(&filename)?;
 
