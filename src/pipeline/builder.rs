@@ -1,5 +1,5 @@
 use crate::{
-    encoders::{dynamic_encoder::DynamicEncoder, video::RawProcessor},
+    encoders::{dynamic_encoder::DynamicEncoder, video::VideoEncoder as VideoEncoderTrait},
     types::{
         config::{AudioEncoder, QualityPreset, VideoEncoder},
         error::Result,
@@ -16,7 +16,7 @@ pub struct CaptureBuilder {
     target_fps: u64,
 }
 
-pub struct CaptureBuilderRaw<V: RawProcessor> {
+pub struct CaptureBuilderRaw<V: VideoEncoderTrait> {
     raw_processor: V,
     include_cursor: bool,
     target_fps: u64,
@@ -47,7 +47,7 @@ impl CaptureBuilder {
         self
     }
 
-    pub fn with_raw_processor<V: RawProcessor>(self, processor: V) -> CaptureBuilderRaw<V> {
+    pub fn with_raw_processor<V: VideoEncoderTrait>(self, processor: V) -> CaptureBuilderRaw<V> {
         CaptureBuilderRaw {
             raw_processor: processor,
             include_cursor: self.include_cursor,

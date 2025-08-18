@@ -21,7 +21,7 @@ use ffmpeg_next::{
 };
 
 use crate::{
-    encoders::video::RawProcessor,
+    encoders::video::VideoEncoder,
     types::{
         config::QualityPreset,
         error::{Result, WaycapError},
@@ -55,7 +55,7 @@ pub struct NvencEncoder {
 unsafe impl Send for NvencEncoder {}
 unsafe impl Sync for NvencEncoder {}
 
-impl RawProcessor for NvencEncoder {
+impl VideoEncoder for NvencEncoder {
     type Output = EncodedVideoFrame;
     fn reset(&mut self) -> Result<()> {
         self.drop_processor();

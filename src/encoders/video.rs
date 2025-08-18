@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 pub const GOP_SIZE: u32 = 30;
 
-pub trait RawProcessor: Send {
+pub trait VideoEncoder: Send {
     type Output;
     /// Process a single raw frame
     /// this is called from inside the thread started by self.start
@@ -46,7 +46,7 @@ pub(crate) fn start_video_loop<T>(
     target_fps: u64,
 ) -> (Arc<Mutex<T>>, JoinHandle<Result<()>>)
 where
-    T: RawProcessor + Sized + 'static,
+    T: VideoEncoder + Sized + 'static,
 {
     let returned_self = Arc::new(Mutex::new(processor));
     let thread_self = Arc::clone(&returned_self);

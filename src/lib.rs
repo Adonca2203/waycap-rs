@@ -82,7 +82,7 @@ pub mod types;
 mod utils;
 mod waycap_egl;
 
-pub use encoders::video::RawProcessor;
+pub use encoders::video::VideoEncoder;
 pub use utils::TIME_UNIT_NS;
 
 pub use crate::encoders::dynamic_encoder::DynamicEncoder;
@@ -121,7 +121,7 @@ pub struct Resolution {
 /// while let Some(encoded_frame) = video_receiver.try_pop() {
 ///     println!("Received an encoded frame");
 /// }
-pub struct Capture<V: RawProcessor + Send> {
+pub struct Capture<V: VideoEncoder + Send> {
     stop_flag: Arc<AtomicBool>,
     pause_flag: Arc<AtomicBool>,
 
@@ -134,7 +134,7 @@ pub struct Capture<V: RawProcessor + Send> {
     pw_audio_terminate_tx: Option<pipewire::channel::Sender<Terminate>>,
 }
 
-impl<V: RawProcessor> Capture<V> {
+impl<V: VideoEncoder> Capture<V> {
     fn start_pipewire(
         &mut self,
         video_encoder_type: Option<VideoEncoderType>,
@@ -478,7 +478,7 @@ fn resolve_video_encoder(video_encoder_type: Option<VideoEncoderType>) -> Result
     Ok(encoder_type)
 }
 
-impl<V: RawProcessor> Drop for Capture<V> {
+impl<V: VideoEncoder> Drop for Capture<V> {
     fn drop(&mut self) {
         let _ = self.close();
 

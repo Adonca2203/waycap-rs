@@ -4,27 +4,27 @@ use ffmpeg_next::codec::encoder;
 use crate::{
     encoders::{nvenc_encoder::NvencEncoder, vaapi_encoder::VaapiEncoder},
     types::{
-        config::VideoEncoder,
+        config::VideoEncoder as VideoEncoderType,
         error::Result,
         video_frame::{EncodedVideoFrame, RawVideoFrame},
     },
-    RawProcessor,
+    VideoEncoder,
 };
 
-pub struct DynamicEncoder(Box<dyn RawProcessor<Output = EncodedVideoFrame>>);
+pub struct DynamicEncoder(Box<dyn VideoEncoder<Output = EncodedVideoFrame>>);
 
 impl DynamicEncoder {
     pub(crate) fn new(
-        encoder_type: VideoEncoder,
+        encoder_type: VideoEncoderType,
         width: u32,
         height: u32,
         quality_preset: crate::types::config::QualityPreset,
     ) -> crate::types::error::Result<DynamicEncoder> {
         let video_encoder = match encoder_type {
-            VideoEncoder::H264Nvenc => {
+            VideoEncoderType::H264Nvenc => {
                 DynamicEncoder(Box::new(NvencEncoder::new(width, height, quality_preset)?))
             }
-            VideoEncoder::H264Vaapi => {
+            VideoEncoderType::H264Vaapi => {
                 DynamicEncoder(Box::new(VaapiEncoder::new(width, height, quality_preset)?))
             }
         };
@@ -32,7 +32,7 @@ impl DynamicEncoder {
     }
 }
 
-impl RawProcessor for DynamicEncoder {
+impl VideoEncoder for DynamicEncoder {
     type Output = EncodedVideoFrame;
 
     fn process(&mut self, frame: &RawVideoFrame) -> Result<()> {

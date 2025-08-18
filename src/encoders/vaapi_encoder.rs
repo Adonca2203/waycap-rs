@@ -13,7 +13,7 @@ use ffmpeg_next::{
 };
 
 use crate::{
-    encoders::video::RawProcessor,
+    encoders::video::VideoEncoder,
     types::{
         config::QualityPreset,
         error::{Result, WaycapError},
@@ -35,7 +35,7 @@ pub struct VaapiEncoder {
     filter_graph: Option<ffmpeg::filter::Graph>,
 }
 
-impl RawProcessor for VaapiEncoder {
+impl VideoEncoder for VaapiEncoder {
     type Output = EncodedVideoFrame;
     fn reset(&mut self) -> Result<()> {
         self.drop_processor();
