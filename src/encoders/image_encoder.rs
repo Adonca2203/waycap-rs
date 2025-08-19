@@ -1,9 +1,19 @@
 use crate::VideoEncoder;
 use crossbeam::channel::{bounded, Receiver, Sender};
-
-struct ImageEncoder {
+use image::RgbaImage;
+pub struct ImageEncoder {
     image_sender: Sender<image::RgbaImage>,
     image_receiver: Receiver<image::RgbaImage>,
+}
+
+impl Default for ImageEncoder {
+    fn default() -> Self {
+        let (image_sender, image_receiver) = crossbeam::channel::bounded(10);
+        Self {
+            image_sender,
+            image_receiver,
+        }
+    }
 }
 
 impl VideoEncoder for ImageEncoder {
@@ -13,7 +23,8 @@ impl VideoEncoder for ImageEncoder {
         &mut self,
         frame: &crate::types::video_frame::RawVideoFrame,
     ) -> crate::types::error::Result<()> {
-        // todo
+        dbg!(frame);
+        Ok(())
     }
 
     fn reset(&mut self) -> crate::types::error::Result<()> {
@@ -21,18 +32,26 @@ impl VideoEncoder for ImageEncoder {
     }
 
     fn output(&mut self) -> Option<crossbeam::channel::Receiver<Self::Output>> {
-        self.image_receiver.clone()
+        Some(self.image_receiver.clone())
     }
 
-    fn drop_processor(&mut self) {
-        Ok(())
-    }
+    fn drop_processor(&mut self) {}
 
     fn drain(&mut self) -> crate::types::error::Result<()> {
         Ok(())
     }
 
     fn get_encoder(&self) -> &Option<ffmpeg_next::codec::encoder::Video> {
-        None
+        &None
+    }
+}
+
+// benchmarked
+// bgra
+// rgba
+pub fn bgra_to_rgba_inplace(buf: &mut [f32]) {
+    let loops = buf.len() / 4;
+    for i in 0..loops {
+        buf.swap(i, i + 2);
     }
 }

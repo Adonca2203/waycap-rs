@@ -50,7 +50,7 @@ where
 {
     let returned_self = Arc::new(Mutex::new(processor));
     let thread_self = Arc::clone(&returned_self);
-
+    println!("starting video loop");
     let handle = std::thread::spawn(move || -> Result<()> {
         let mut last_timestamp: u64 = 0;
         let frame_interval = TIME_UNIT_NS / target_fps;
@@ -60,6 +60,7 @@ where
         while !stop.load(Ordering::Acquire) {
             if pause.load(Ordering::Acquire) {
                 std::thread::sleep(Duration::from_millis(100));
+                println!("still paused");
                 continue;
             }
             select! {

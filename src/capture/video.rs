@@ -163,24 +163,27 @@ impl VideoCapture {
                     std::sync::atomic::Ordering::Release,
                 );
             })
-            .param_changed(move |_, user_data, id, param| {
+            .param_changed(move |stream_ref, user_data, id, param| {
                 let Some(param) = param else {
+                    println!("no param");
                     return;
                 };
 
                 if id != pw::spa::param::ParamType::Format.as_raw() {
+                    println!("wrong format: {id:?}");
                     return;
                 }
 
                 let (media_type, media_subtype) =
                     match pw::spa::param::format_utils::parse_format(param) {
                         Ok(v) => v,
-                        Err(_) => return,
+                        Err(_) => {println!("wrong parse format"); return},
                     };
 
                 if media_type != pw::spa::param::format::MediaType::Video
                     || media_subtype != pw::spa::param::format::MediaSubtype::Raw
-                {
+                {   
+                    println!("wrong type");
                     return;
                 }
 
@@ -202,8 +205,8 @@ impl VideoCapture {
                     );
                 match resolution_sender.send(Resolution { width, height }) {
                     Ok(_) => {}
-                    Err(_) => {
-                        log::error!("Tried to send resolution update {width}x{height} but ran into an error on the channel.");
+                    Err(e) => {
+                        log::error!("Tried to send resolution update {width}x{height} but ran into an error on the channel: {e}");
                     }
                 };
 
@@ -217,6 +220,9 @@ impl VideoCapture {
                     user_data.video_format.framerate().num,
                     user_data.video_format.framerate().denom
                 );
+                // build_stream_param
+                // stream_ref.update_params(&mut     ).unwrap();
+
             })
             .process(move |stream, udata| {
                 match stream.dequeue_buffer() {
@@ -231,6 +237,7 @@ impl VideoCapture {
 
                         let datas = buffer.datas_mut();
                         if datas.is_empty() {
+                            println!("empty");
                             return;
                         }
 

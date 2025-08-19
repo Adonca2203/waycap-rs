@@ -86,6 +86,7 @@ pub use encoders::video::VideoEncoder;
 pub use utils::TIME_UNIT_NS;
 
 pub use crate::encoders::dynamic_encoder::DynamicEncoder;
+pub use crate::encoders::image_encoder::ImageEncoder;
 use crate::encoders::video::start_video_loop;
 
 /// Target Screen Resolution
@@ -135,9 +136,49 @@ pub struct Capture<V: VideoEncoder + Send> {
 }
 
 impl<V: VideoEncoder> Capture<V> {
-    fn start_pipewire(
+    pub fn new_with_encoder(video_encoder: V, include_cursor: bool, target_fps: u64) -> Result<Self>
+    where
+        V: 'static,
+    {
+        let mut _self = Self {
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            pause_flag: Arc::new(AtomicBool::new(false)),
+            worker_handles: Vec::new(),
+            video_encoder: None,
+            audio_encoder: None,
+            pw_video_terminate_tx: None,
+            pw_audio_terminate_tx: None,
+        };
+
+        let (frame_rx, video_ready, audio_ready, resolution) =
+            _self.start_pipewire_video(false, include_cursor)?;
+        std::thread::sleep(Duration::from_millis(100));
+        audio_ready.store(true, Ordering::Release);
+        _self.start().unwrap();
+
+        println!("waiting for video ready");
+        // while !video_ready.load(Ordering::Acquire) {
+        //     std::thread::sleep(Duration::from_millis(100));
+        //     println!(".")
+        // }
+
+        let (video_encoder, video_loop) = start_video_loop(
+            video_encoder,
+            frame_rx,
+            Arc::clone(&_self.stop_flag),
+            Arc::clone(&_self.pause_flag),
+            target_fps,
+        );
+        _self.video_encoder = Some(video_encoder);
+        _self.worker_handles.push(video_loop);
+
+        log::info!("Capture started successfully.");
+        Ok(_self)
+    }
+
+    fn start_pipewire_video(
         &mut self,
-        video_encoder_type: Option<VideoEncoderType>,
+        use_nvidia_modifiers: bool,
         include_cursor: bool,
     ) -> Result<(
         Receiver<RawVideoFrame>,
@@ -169,7 +210,6 @@ impl<V: VideoEncoder> Capture<V> {
         let fd = active_cast.pipewire_fd();
         let stream = active_cast.streams().next().unwrap();
         let stream_node = stream.pipewire_node();
-        let encoder_type = resolve_video_encoder(video_encoder_type)?;
         let pause_video = Arc::clone(&self.pause_flag);
         self.worker_handles
             .push(std::thread::spawn(move || -> Result<()> {
@@ -178,7 +218,7 @@ impl<V: VideoEncoder> Capture<V> {
                     stream_node,
                     video_ready_pw,
                     audio_ready_pw,
-                    matches!(encoder_type, VideoEncoderType::H264Nvenc),
+                    use_nvidia_modifiers,
                     pause_video,
                     reso_sender,
                     frame_tx,
@@ -216,6 +256,18 @@ impl<V: VideoEncoder> Capture<V> {
         };
 
         Ok((frame_rx, video_ready, audio_ready, resolution))
+    }
+
+    /// Enables capture streams to send their frames to their encoders
+    pub fn start(&mut self) -> Result<()> {
+        self.pause_flag.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Temporarily stops the recording by blocking frames from being sent to the encoders
+    pub fn pause(&mut self) -> Result<()> {
+        self.pause_flag.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Stop recording and drain the encoders of any last frames they have in their internal
@@ -320,15 +372,14 @@ impl Capture<DynamicEncoder> {
             pw_audio_terminate_tx: None,
         };
 
-        let (frame_rx, video_ready, audio_ready, resolution) =
-            _self.start_pipewire(video_encoder_type, include_cursor)?;
-
-        let video_encoder = DynamicEncoder::new(
-            resolve_video_encoder(video_encoder_type)?,
-            resolution.width,
-            resolution.height,
-            quality,
+        let encoder_type = resolve_video_encoder(video_encoder_type)?;
+        let (frame_rx, video_ready, audio_ready, resolution) = _self.start_pipewire_video(
+            matches!(encoder_type, VideoEncoderType::H264Nvenc),
+            include_cursor,
         )?;
+
+        let video_encoder =
+            DynamicEncoder::new(encoder_type, resolution.width, resolution.height, quality)?;
 
         let audio_rx = _self.start_pipewire_audio(
             audio_encoder_type,
@@ -364,18 +415,6 @@ impl Capture<DynamicEncoder> {
 
         log::info!("Capture started successfully.");
         Ok(_self)
-    }
-
-    /// Enables capture streams to send their frames to their encoders
-    pub fn start(&mut self) -> Result<()> {
-        self.pause_flag.store(false, Ordering::Release);
-        Ok(())
-    }
-
-    /// Temporarily stops the recording by blocking frames from being sent to the encoders
-    pub fn pause(&mut self) -> Result<()> {
-        self.pause_flag.store(true, Ordering::Release);
-        Ok(())
     }
 
     /// Get a channel for which to receive encoded video frames.
