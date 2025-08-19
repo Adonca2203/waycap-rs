@@ -35,24 +35,7 @@ use crate::{
 
 use super::Terminate;
 
-// Literally stole these by looking at what OBS uses
-// just magic numbers to me no clue what these are
-// but they enable DMA Buf so it is what it is
-const NVIDIA_MODIFIERS: &[i64] = &[
-    216172782120099856,
-    216172782120099857,
-    216172782120099858,
-    216172782120099859,
-    216172782120099860,
-    216172782120099861,
-    216172782128496656,
-    216172782128496657,
-    216172782128496658,
-    216172782128496659,
-    216172782128496660,
-    216172782128496661,
-    72057594037927935,
-];
+
 
 pub struct VideoCapture {
     termination_recv: Option<pw::channel::Receiver<Terminate>>,
@@ -81,11 +64,11 @@ impl VideoCapture {
         stream_node: u32,
         video_ready: Arc<AtomicBool>,
         audio_ready: Arc<AtomicBool>,
-        use_nvidia_modifiers: bool,
         saving: Arc<AtomicBool>,
         resolution_sender: mpsc::Sender<Resolution>,
         frame_tx: Sender<RawVideoFrame>,
         termination_recv: pw::channel::Receiver<Terminate>,
+        pw_obj: spa::pod::Object,
     ) -> Result<Self> {
         let pw_loop = MainLoop::new(None)?;
         let context = Context::new(&pw_loop)?;
@@ -101,7 +84,7 @@ impl VideoCapture {
             resolution_sender.clone(),
             frame_tx.clone(),
         )?;
-        Self::connect_stream(&mut stream, stream_node, use_nvidia_modifiers)?;
+        Self::connect_stream(&mut stream, stream_node, pw_obj)?;
 
         Ok(Self {
             termination_recv: Some(termination_recv),
@@ -253,6 +236,8 @@ impl VideoCapture {
                             offset: data.chunk().offset(),
                             size: data.chunk().size(),
                             modifier: udata.video_format.modifier(),
+                            format: udata.video_format.format(),
+                            dimensions: udata.video_format.size()
                         }) {
                             Ok(_) => {}
                             Err(crossbeam::channel::TrySendError::Full(frame)) => {
@@ -281,130 +266,8 @@ impl VideoCapture {
     fn connect_stream(
         stream: &mut Stream,
         stream_node: u32,
-        use_nvidia_modifiers: bool,
+        pw_obj: spa::pod::Object,
     ) -> Result<()> {
-        let pw_obj = if use_nvidia_modifiers {
-            let nvidia_mod_property = Property {
-                key: pw::spa::param::format::FormatProperties::VideoModifier.as_raw(),
-                flags: PropertyFlags::empty(),
-                value: spa::pod::Value::Choice(spa::pod::ChoiceValue::Long(Choice::<i64>(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::<i64>::Enum {
-                        default: NVIDIA_MODIFIERS[0],
-                        alternatives: NVIDIA_MODIFIERS.to_vec(),
-                    },
-                ))),
-            };
-
-            pw::spa::pod::object!(
-                pw::spa::utils::SpaTypes::ObjectParamFormat,
-                pw::spa::param::ParamType::EnumFormat,
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::MediaType,
-                    Id,
-                    pw::spa::param::format::MediaType::Video
-                ),
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::MediaSubtype,
-                    Id,
-                    pw::spa::param::format::MediaSubtype::Raw
-                ),
-                nvidia_mod_property,
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::VideoFormat,
-                    Choice,
-                    Enum,
-                    Id,
-                    pw::spa::param::video::VideoFormat::NV12,
-                    pw::spa::param::video::VideoFormat::I420,
-                    pw::spa::param::video::VideoFormat::BGRA,
-                ),
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::VideoSize,
-                    Choice,
-                    Range,
-                    Rectangle,
-                    pw::spa::utils::Rectangle {
-                        width: 2560,
-                        height: 1440
-                    }, // Default
-                    pw::spa::utils::Rectangle {
-                        width: 1,
-                        height: 1
-                    }, // Min
-                    pw::spa::utils::Rectangle {
-                        width: 4096,
-                        height: 4096
-                    } // Max
-                ),
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::VideoFramerate,
-                    Choice,
-                    Range,
-                    Fraction,
-                    pw::spa::utils::Fraction { num: 240, denom: 1 }, // Default
-                    pw::spa::utils::Fraction { num: 0, denom: 1 },   // Min
-                    pw::spa::utils::Fraction { num: 244, denom: 1 }  // Max
-                ),
-            )
-        } else {
-            pw::spa::pod::object!(
-                pw::spa::utils::SpaTypes::ObjectParamFormat,
-                pw::spa::param::ParamType::EnumFormat,
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::MediaType,
-                    Id,
-                    pw::spa::param::format::MediaType::Video
-                ),
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::MediaSubtype,
-                    Id,
-                    pw::spa::param::format::MediaSubtype::Raw
-                ),
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::VideoModifier,
-                    Long,
-                    0
-                ),
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::VideoFormat,
-                    Choice,
-                    Enum,
-                    Id,
-                    pw::spa::param::video::VideoFormat::NV12,
-                    pw::spa::param::video::VideoFormat::I420,
-                    pw::spa::param::video::VideoFormat::BGRA,
-                ),
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::VideoSize,
-                    Choice,
-                    Range,
-                    Rectangle,
-                    pw::spa::utils::Rectangle {
-                        width: 2560,
-                        height: 1440
-                    }, // Default
-                    pw::spa::utils::Rectangle {
-                        width: 1,
-                        height: 1
-                    }, // Min
-                    pw::spa::utils::Rectangle {
-                        width: 4096,
-                        height: 4096
-                    } // Max
-                ),
-                pw::spa::pod::property!(
-                    pw::spa::param::format::FormatProperties::VideoFramerate,
-                    Choice,
-                    Range,
-                    Fraction,
-                    pw::spa::utils::Fraction { num: 240, denom: 1 }, // Default
-                    pw::spa::utils::Fraction { num: 0, denom: 1 },   // Min
-                    pw::spa::utils::Fraction { num: 244, denom: 1 }  // Max
-                ),
-            )
-        };
-
         let video_spa_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
             std::io::Cursor::new(Vec::new()),
             &pw::spa::pod::Value::Object(pw_obj),

@@ -1,5 +1,7 @@
 use std::os::fd::RawFd;
 
+use pipewire::spa::{param::video::VideoFormat, utils::Rectangle};
+
 #[derive(Debug)]
 pub struct EncodedVideoFrame {
     pub data: Vec<u8>,
@@ -19,6 +21,8 @@ pub struct RawVideoFrame {
     pub offset: u32,
     pub size: u32,
     pub modifier: u64,
+    pub format: VideoFormat,
+    pub dimensions: Rectangle,
 }
 
 #[derive(Debug)]

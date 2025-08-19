@@ -87,7 +87,7 @@ pub use utils::TIME_UNIT_NS;
 
 pub use crate::encoders::dynamic_encoder::DynamicEncoder;
 pub use crate::encoders::image_encoder::ImageEncoder;
-use crate::encoders::video::start_video_loop;
+use crate::encoders::video::{start_video_loop, PipewireSPA};
 
 /// Target Screen Resolution
 pub struct Resolution {
@@ -122,7 +122,7 @@ pub struct Resolution {
 /// while let Some(encoded_frame) = video_receiver.try_pop() {
 ///     println!("Received an encoded frame");
 /// }
-pub struct Capture<V: VideoEncoder + Send> {
+pub struct Capture<V: VideoEncoder + PipewireSPA + Send> {
     stop_flag: Arc<AtomicBool>,
     pause_flag: Arc<AtomicBool>,
 
@@ -135,7 +135,7 @@ pub struct Capture<V: VideoEncoder + Send> {
     pw_audio_terminate_tx: Option<pipewire::channel::Sender<Terminate>>,
 }
 
-impl<V: VideoEncoder> Capture<V> {
+impl<V: VideoEncoder + PipewireSPA> Capture<V> {
     pub fn new_with_encoder(video_encoder: V, include_cursor: bool, target_fps: u64) -> Result<Self>
     where
         V: 'static,
@@ -151,7 +151,8 @@ impl<V: VideoEncoder> Capture<V> {
         };
 
         let (frame_rx, video_ready, audio_ready, resolution) =
-            _self.start_pipewire_video(false, include_cursor)?;
+            _self.start_pipewire_video(include_cursor)?;
+
         std::thread::sleep(Duration::from_millis(100));
         audio_ready.store(true, Ordering::Release);
         _self.start().unwrap();
@@ -178,7 +179,6 @@ impl<V: VideoEncoder> Capture<V> {
 
     fn start_pipewire_video(
         &mut self,
-        use_nvidia_modifiers: bool,
         include_cursor: bool,
     ) -> Result<(
         Receiver<RawVideoFrame>,
@@ -218,11 +218,11 @@ impl<V: VideoEncoder> Capture<V> {
                     stream_node,
                     video_ready_pw,
                     audio_ready_pw,
-                    use_nvidia_modifiers,
                     pause_video,
                     reso_sender,
                     frame_tx,
                     pw_recv,
+                    V::get_spa_definition()?,
                 ) {
                     Ok(pw_capture) => pw_capture,
                     Err(e) => {
@@ -317,6 +317,16 @@ impl<V: VideoEncoder> Capture<V> {
 
         Ok(())
     }
+
+    pub fn get_output(&mut self) -> Receiver<V::Output> {
+        self.video_encoder
+            .as_mut()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .output()
+            .unwrap()
+    }
 }
 
 impl Capture<DynamicEncoder> {
@@ -373,10 +383,8 @@ impl Capture<DynamicEncoder> {
         };
 
         let encoder_type = resolve_video_encoder(video_encoder_type)?;
-        let (frame_rx, video_ready, audio_ready, resolution) = _self.start_pipewire_video(
-            matches!(encoder_type, VideoEncoderType::H264Nvenc),
-            include_cursor,
-        )?;
+        let (frame_rx, video_ready, audio_ready, resolution) =
+            _self.start_pipewire_video(include_cursor)?;
 
         let video_encoder =
             DynamicEncoder::new(encoder_type, resolution.width, resolution.height, quality)?;
@@ -517,7 +525,7 @@ fn resolve_video_encoder(video_encoder_type: Option<VideoEncoderType>) -> Result
     Ok(encoder_type)
 }
 
-impl<V: VideoEncoder> Drop for Capture<V> {
+impl<V: VideoEncoder + PipewireSPA> Drop for Capture<V> {
     fn drop(&mut self) {
         let _ = self.close();
 

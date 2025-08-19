@@ -19,9 +19,10 @@ use ffmpeg_next::{
     },
     Rational,
 };
+use pipewire as pw;
 
 use crate::{
-    encoders::video::VideoEncoder,
+    encoders::video::{PipewireSPA, VideoEncoder},
     types::{
         config::QualityPreset,
         error::{Result, WaycapError},
@@ -36,6 +37,25 @@ use super::{
     cuda::{cuGraphicsGLRegisterImage, AVCUDADeviceContext},
     video::{create_hw_frame_ctx, GOP_SIZE},
 };
+
+// Literally stole these by looking at what OBS uses
+// just magic numbers to me no clue what these are
+// but they enable DMA Buf so it is what it is
+const NVIDIA_MODIFIERS: &[i64] = &[
+    216172782120099856,
+    216172782120099857,
+    216172782120099858,
+    216172782120099859,
+    216172782120099860,
+    216172782120099861,
+    216172782128496656,
+    216172782128496657,
+    216172782128496658,
+    216172782128496659,
+    216172782128496660,
+    216172782128496661,
+    72057594037927935,
+];
 
 pub struct NvencEncoder {
     encoder: Option<ffmpeg::codec::encoder::Video>,
@@ -222,6 +242,75 @@ impl VideoEncoder for NvencEncoder {
 
     fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video> {
         &self.encoder
+    }
+}
+impl PipewireSPA for NvencEncoder {
+    fn get_spa_definition() -> Result<pw::spa::pod::Object> {
+        let nvidia_mod_property = pw::spa::pod::Property {
+            key: pw::spa::param::format::FormatProperties::VideoModifier.as_raw(),
+            flags: pw::spa::pod::PropertyFlags::empty(),
+            value: pw::spa::pod::Value::Choice(pw::spa::pod::ChoiceValue::Long(
+                pw::spa::utils::Choice::<i64>(
+                    pw::spa::utils::ChoiceFlags::empty(),
+                    pw::spa::utils::ChoiceEnum::<i64>::Enum {
+                        default: NVIDIA_MODIFIERS[0],
+                        alternatives: NVIDIA_MODIFIERS.to_vec(),
+                    },
+                ),
+            )),
+        };
+
+        Ok(pw::spa::pod::object!(
+            pw::spa::utils::SpaTypes::ObjectParamFormat,
+            pw::spa::param::ParamType::EnumFormat,
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::MediaType,
+                Id,
+                pw::spa::param::format::MediaType::Video
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::MediaSubtype,
+                Id,
+                pw::spa::param::format::MediaSubtype::Raw
+            ),
+            nvidia_mod_property,
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoFormat,
+                Choice,
+                Enum,
+                Id,
+                pw::spa::param::video::VideoFormat::NV12,
+                pw::spa::param::video::VideoFormat::I420,
+                pw::spa::param::video::VideoFormat::BGRA
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoSize,
+                Choice,
+                Range,
+                Rectangle,
+                pw::spa::utils::Rectangle {
+                    width: 2560,
+                    height: 1440
+                }, // Default
+                pw::spa::utils::Rectangle {
+                    width: 1,
+                    height: 1
+                }, // Min
+                pw::spa::utils::Rectangle {
+                    width: 4096,
+                    height: 4096
+                } // Max
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoFramerate,
+                Choice,
+                Range,
+                Fraction,
+                pw::spa::utils::Fraction { num: 240, denom: 1 }, // Default
+                pw::spa::utils::Fraction { num: 0, denom: 1 },   // Min
+                pw::spa::utils::Fraction { num: 244, denom: 1 }  // Max
+            ),
+        ))
     }
 }
 

@@ -12,6 +12,7 @@ use crossbeam::channel::Receiver;
 use crossbeam::select;
 use ffmpeg::ffi::{av_hwdevice_ctx_create, av_hwframe_ctx_alloc, AVBufferRef};
 use ffmpeg_next::{self as ffmpeg};
+use pipewire::spa;
 use std::sync::Mutex;
 
 pub const GOP_SIZE: u32 = 30;
@@ -36,6 +37,10 @@ pub trait VideoEncoder: Send {
     fn drop_processor(&mut self);
     fn drain(&mut self) -> Result<()>;
     fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video>;
+}
+
+pub trait PipewireSPA {
+    fn get_spa_definition() -> Result<spa::pod::Object>;
 }
 
 pub(crate) fn start_video_loop<T>(

@@ -2,12 +2,13 @@ use crossbeam::channel::Receiver;
 use ffmpeg_next::codec::encoder;
 
 use crate::{
-    encoders::{nvenc_encoder::NvencEncoder, vaapi_encoder::VaapiEncoder},
+    encoders::{nvenc_encoder::NvencEncoder, vaapi_encoder::VaapiEncoder, video::PipewireSPA},
     types::{
         config::VideoEncoder as VideoEncoderType,
-        error::Result,
+        error::{Result, WaycapError},
         video_frame::{EncodedVideoFrame, RawVideoFrame},
     },
+    waycap_egl::{EglContext, GpuVendor},
     VideoEncoder,
 };
 
@@ -60,5 +61,20 @@ impl VideoEncoder for DynamicEncoder {
     }
     fn thread_setup(&mut self) -> Result<()> {
         self.0.thread_setup()
+    }
+}
+
+impl PipewireSPA for DynamicEncoder {
+    fn get_spa_definition() -> Result<pipewire::spa::pod::Object> {
+        let dummy_context = EglContext::new(100, 100)?;
+        match dummy_context.get_gpu_vendor() {
+            GpuVendor::NVIDIA => NvencEncoder::get_spa_definition(),
+            GpuVendor::AMD | GpuVendor::INTEL => VaapiEncoder::get_spa_definition(),
+            GpuVendor::UNKNOWN => {
+                return Err(WaycapError::Init(
+                    "Unknown/Unimplemented GPU vendor".to_string(),
+                ));
+            }
+        }
     }
 }

@@ -16,8 +16,12 @@ pub struct CaptureBuilder {
     target_fps: u64,
 }
 
-pub struct CaptureBuilderRaw<V: VideoEncoderTrait> {
-    raw_processor: V,
+pub struct CaptureBuilderRaw<V, C>
+where
+    V: VideoEncoderTrait,
+    C: FnOnce() -> V,
+{
+    make_processor: C,
     include_cursor: bool,
     target_fps: u64,
 }
@@ -47,9 +51,13 @@ impl CaptureBuilder {
         self
     }
 
-    pub fn with_raw_processor<V: VideoEncoderTrait>(self, processor: V) -> CaptureBuilderRaw<V> {
+    pub fn with_raw_processor<V, C>(self, make_processor: C) -> CaptureBuilderRaw<V, C>
+    where
+        V: VideoEncoderTrait,
+        C: FnOnce() -> V,
+    {
         CaptureBuilderRaw {
-            raw_processor: processor,
+            make_processor: make_processor,
             include_cursor: self.include_cursor,
             target_fps: self.target_fps,
         }

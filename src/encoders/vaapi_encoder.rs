@@ -1,5 +1,14 @@
 use std::ptr::null_mut;
 
+use crate::{
+    encoders::video::{PipewireSPA, VideoEncoder},
+    types::{
+        config::QualityPreset,
+        error::{Result, WaycapError},
+        video_frame::{EncodedVideoFrame, RawVideoFrame},
+    },
+    utils::TIME_UNIT_NS,
+};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use drm_fourcc::DrmFourcc;
 use ffmpeg_next::{
@@ -11,16 +20,7 @@ use ffmpeg_next::{
     },
     Rational,
 };
-
-use crate::{
-    encoders::video::VideoEncoder,
-    types::{
-        config::QualityPreset,
-        error::{Result, WaycapError},
-        video_frame::{EncodedVideoFrame, RawVideoFrame},
-    },
-    utils::TIME_UNIT_NS,
-};
+use pipewire as pw;
 
 use super::video::{create_hw_device, create_hw_frame_ctx, GOP_SIZE};
 
@@ -173,6 +173,66 @@ impl VideoEncoder for VaapiEncoder {
     }
     fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video> {
         &self.encoder
+    }
+}
+
+impl PipewireSPA for VaapiEncoder {
+    fn get_spa_definition() -> Result<pw::spa::pod::Object> {
+        Ok(pw::spa::pod::object!(
+            pw::spa::utils::SpaTypes::ObjectParamFormat,
+            pw::spa::param::ParamType::EnumFormat,
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::MediaType,
+                Id,
+                pw::spa::param::format::MediaType::Video
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::MediaSubtype,
+                Id,
+                pw::spa::param::format::MediaSubtype::Raw
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoModifier,
+                Long,
+                0
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoFormat,
+                Choice,
+                Enum,
+                Id,
+                pw::spa::param::video::VideoFormat::NV12,
+                pw::spa::param::video::VideoFormat::I420,
+                pw::spa::param::video::VideoFormat::BGRA,
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoSize,
+                Choice,
+                Range,
+                Rectangle,
+                pw::spa::utils::Rectangle {
+                    width: 2560,
+                    height: 1440
+                }, // Default
+                pw::spa::utils::Rectangle {
+                    width: 1,
+                    height: 1
+                }, // Min
+                pw::spa::utils::Rectangle {
+                    width: 4096,
+                    height: 4096
+                } // Max
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoFramerate,
+                Choice,
+                Range,
+                Fraction,
+                pw::spa::utils::Fraction { num: 240, denom: 1 }, // Default
+                pw::spa::utils::Fraction { num: 0, denom: 1 },   // Min
+                pw::spa::utils::Fraction { num: 244, denom: 1 }  // Max
+            ),
+        ))
     }
 }
 

@@ -16,7 +16,7 @@ use waycap_rs::{
 };
 
 fn main() -> Result<()> {
-    simple_logging::log_to_stderr(log::LevelFilter::Debug);
+    simple_logging::log_to_stderr(log::LevelFilter::Trace);
     log::info!("Simple Capture and Save Example");
     log::info!("=====================");
     log::info!("This example will capture your screen for 10 seconds");
