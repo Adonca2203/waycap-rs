@@ -21,15 +21,17 @@
 //! ## Example
 //!
 //! ```rust
-//! use waycap_rs::{CaptureBuilder, QualityPreset, VideoEncoder, AudioEncoder};
+//! use waycap_rs::pipeline::builder::CaptureBuilder;
+//! use waycap_rs::types::config::{AudioEncoder, QualityPreset, VideoEncoder};
 //!
+//! # move || {
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create a capture instance
 //!     let mut capture = CaptureBuilder::new()
 //!         .with_audio()
 //!         .with_quality_preset(QualityPreset::Medium)
 //!         .with_cursor_shown()
-//!         .with_video_encoder(VideoEncoder::Vaapi)
+//!         .with_video_encoder(VideoEncoder::H264Vaapi)
 //!         .with_audio_encoder(AudioEncoder::Opus)
 //!         .build()?;
 //!     
@@ -47,12 +49,13 @@
 //!     
 //!     Ok(())
 //! }
+//! # };
 //! ```
 
 #![warn(clippy::all)]
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self},
         Arc,
     },
@@ -73,7 +76,6 @@ use types::{
     error::{Result, WaycapError},
     video_frame::{EncodedVideoFrame, RawVideoFrame},
 };
-use waycap_egl::{EglContext, GpuVendor};
 
 mod capture;
 mod encoders;
@@ -82,12 +84,15 @@ pub mod types;
 mod utils;
 mod waycap_egl;
 
+pub use crate::encoders::dma_buf_encoder::DmaBufEncoder;
+pub use crate::encoders::dynamic_encoder::DynamicEncoder;
+pub use crate::encoders::nvenc_encoder::NvencEncoder;
+pub use crate::encoders::rgba_image_encoder::RgbaImageEncoder;
+pub use crate::encoders::vaapi_encoder::VaapiEncoder;
 pub use encoders::video::VideoEncoder;
 pub use utils::TIME_UNIT_NS;
 
-pub use crate::encoders::dynamic_encoder::DynamicEncoder;
-pub use crate::encoders::image_encoder::ImageEncoder;
-use crate::encoders::video::{start_video_loop, PipewireSPA};
+use crate::encoders::video::{PipewireSPA, StartVideoEncoder};
 
 /// Target Screen Resolution
 pub struct Resolution {
@@ -103,12 +108,14 @@ pub struct Resolution {
 /// # Examples
 ///
 /// ```
-/// use waycap_rs::{CaptureBuilder, QualityPreset, VideoEncoder};
+/// use waycap_rs::pipeline::builder::CaptureBuilder;
+/// use waycap_rs::types::config::{QualityPreset, VideoEncoder};
 ///
+/// # move || {
 /// // Create a capture instance
 /// let mut capture = CaptureBuilder::new()
 ///     .with_quality_preset(QualityPreset::Medium)
-///     .with_video_encoder(VideoEncoder::Vaapi)
+///     .with_video_encoder(VideoEncoder::H264Vaapi)
 ///     .build()
 ///     .expect("Failed to create capture");
 ///
@@ -119,13 +126,14 @@ pub struct Resolution {
 /// let video_receiver = capture.get_video_receiver();
 ///
 /// // Process Frames
-/// while let Some(encoded_frame) = video_receiver.try_pop() {
+/// loop {
+///     let frame = video_receiver.recv();
 ///     println!("Received an encoded frame");
 /// }
-pub struct Capture<V: VideoEncoder + PipewireSPA + Send> {
-    stop_flag: Arc<AtomicBool>,
-    pause_flag: Arc<AtomicBool>,
-
+/// # };
+/// ```
+pub struct Capture<V: VideoEncoder + Send> {
+    controls: Arc<CaptureControls>,
     worker_handles: Vec<std::thread::JoinHandle<Result<()>>>,
 
     video_encoder: Option<Arc<Mutex<V>>>,
@@ -135,64 +143,109 @@ pub struct Capture<V: VideoEncoder + PipewireSPA + Send> {
     pw_audio_terminate_tx: Option<pipewire::channel::Sender<Terminate>>,
 }
 
-impl<V: VideoEncoder + PipewireSPA> Capture<V> {
+#[derive(Debug)]
+pub struct CaptureControls {
+    stop_flag: AtomicBool,
+    pause_flag: AtomicBool,
+    target_fps: AtomicU64,
+}
+
+impl CaptureControls {
+    fn from_fps(target_fps: u64) -> Self {
+        Self {
+            stop_flag: AtomicBool::new(false),
+            pause_flag: AtomicBool::new(true),
+            target_fps: AtomicU64::new(target_fps),
+        }
+    }
+    /// True when stopped or paused
+    pub fn skip_processing(&self) -> bool {
+        self.is_paused() || self.is_stopped()
+    }
+    /// Check if processing is currently paused
+    pub fn is_paused(&self) -> bool {
+        self.pause_flag.load(Ordering::Acquire)
+    }
+    /// Check if processing is currently stopped
+    pub fn is_stopped(&self) -> bool {
+        self.stop_flag.load(Ordering::Acquire)
+    }
+    /// Stop processing
+    pub fn stop(&self) {
+        self.stop_flag.store(true, Ordering::Release);
+    }
+
+    /// Pause processing
+    pub fn pause(&self) {
+        self.pause_flag.store(true, Ordering::Release);
+    }
+
+    /// Resume processing
+    pub fn resume(&self) {
+        self.pause_flag.store(false, Ordering::Release);
+    }
+
+    /// Frame interval in nanoseconds
+    pub fn frame_interval_ns(&self) -> u64 {
+        TIME_UNIT_NS / self.target_fps.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct ReadyState {
+    audio: AtomicBool,
+    video: AtomicBool,
+}
+
+impl ReadyState {
+    pub fn video_ready(&self) -> bool {
+        self.video.load(Ordering::Acquire)
+    }
+    pub fn audio_ready(&self) -> bool {
+        self.audio.load(Ordering::Acquire)
+    }
+    fn wait_for_both(&self) {
+        while !self.audio.load(Ordering::Acquire) || !self.video.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+impl<V: VideoEncoder + PipewireSPA + StartVideoEncoder> Capture<V> {
     pub fn new_with_encoder(video_encoder: V, include_cursor: bool, target_fps: u64) -> Result<Self>
     where
         V: 'static,
     {
         let mut _self = Self {
-            stop_flag: Arc::new(AtomicBool::new(false)),
-            pause_flag: Arc::new(AtomicBool::new(false)),
+            controls: Arc::new(CaptureControls::from_fps(target_fps)),
             worker_handles: Vec::new(),
-            video_encoder: None,
+            video_encoder: Some(Arc::new(Mutex::new(video_encoder))),
             audio_encoder: None,
             pw_video_terminate_tx: None,
             pw_audio_terminate_tx: None,
         };
 
-        let (frame_rx, video_ready, audio_ready, resolution) =
-            _self.start_pipewire_video(include_cursor)?;
+        let (frame_rx, ready_state, _) = _self.start_pipewire_video(include_cursor)?;
 
         std::thread::sleep(Duration::from_millis(100));
-        audio_ready.store(true, Ordering::Release);
+        ready_state.audio.store(true, Ordering::Release);
         _self.start().unwrap();
 
-        println!("waiting for video ready");
-        // while !video_ready.load(Ordering::Acquire) {
-        //     std::thread::sleep(Duration::from_millis(100));
-        //     println!(".")
-        // }
+        ready_state.wait_for_both();
 
-        let (video_encoder, video_loop) = start_video_loop(
-            video_encoder,
-            frame_rx,
-            Arc::clone(&_self.stop_flag),
-            Arc::clone(&_self.pause_flag),
-            target_fps,
-        );
-        _self.video_encoder = Some(video_encoder);
-        _self.worker_handles.push(video_loop);
+        V::start_processing(&mut _self, frame_rx)?;
 
         log::info!("Capture started successfully.");
         Ok(_self)
     }
-
     fn start_pipewire_video(
         &mut self,
         include_cursor: bool,
-    ) -> Result<(
-        Receiver<RawVideoFrame>,
-        Arc<AtomicBool>,
-        Arc<AtomicBool>,
-        Resolution,
-    )> {
+    ) -> Result<(Receiver<RawVideoFrame>, Arc<ReadyState>, Resolution)> {
         let (frame_tx, frame_rx): (Sender<RawVideoFrame>, Receiver<RawVideoFrame>) = bounded(10);
 
-        let audio_ready = Arc::new(AtomicBool::new(false));
-        let audio_ready_pw = Arc::clone(&audio_ready);
-
-        let video_ready = Arc::new(AtomicBool::new(false));
-        let video_ready_pw = Arc::clone(&video_ready);
+        let ready_state = Arc::new(ReadyState::default());
+        let ready_state_pw = Arc::clone(&ready_state);
 
         let (pw_sender, pw_recv) = pipewire::channel::channel();
         self.pw_video_terminate_tx = Some(pw_sender);
@@ -210,15 +263,14 @@ impl<V: VideoEncoder + PipewireSPA> Capture<V> {
         let fd = active_cast.pipewire_fd();
         let stream = active_cast.streams().next().unwrap();
         let stream_node = stream.pipewire_node();
-        let pause_video = Arc::clone(&self.pause_flag);
+        let controls = Arc::clone(&self.controls);
         self.worker_handles
             .push(std::thread::spawn(move || -> Result<()> {
                 let mut video_cap = match VideoCapture::new(
                     fd,
                     stream_node,
-                    video_ready_pw,
-                    audio_ready_pw,
-                    pause_video,
+                    ready_state_pw,
+                    controls,
                     reso_sender,
                     frame_tx,
                     pw_recv,
@@ -255,25 +307,52 @@ impl<V: VideoEncoder + PipewireSPA> Capture<V> {
             std::thread::sleep(Duration::from_millis(100));
         };
 
-        Ok((frame_rx, video_ready, audio_ready, resolution))
+        Ok((frame_rx, ready_state, resolution))
     }
 
+    fn start_pipewire_audio(
+        &mut self,
+        audio_encoder_type: AudioEncoderType,
+        ready_state: Arc<ReadyState>,
+    ) -> Result<Receiver<RawAudioFrame>> {
+        let (pw_audio_sender, pw_audio_recv) = pipewire::channel::channel();
+        self.pw_audio_terminate_tx = Some(pw_audio_sender);
+        let (audio_tx, audio_rx): (Sender<RawAudioFrame>, Receiver<RawAudioFrame>) = bounded(10);
+        let controls = Arc::clone(&self.controls);
+        let pw_audio_worker = std::thread::spawn(move || -> Result<()> {
+            log::debug!("Starting audio stream");
+            let audio_cap = AudioCapture::new(ready_state);
+            audio_cap.run(audio_tx, pw_audio_recv, controls)?;
+            Ok(())
+        });
+
+        self.worker_handles.push(pw_audio_worker);
+
+        let enc: Arc<Mutex<dyn AudioEncoder + Send>> = match audio_encoder_type {
+            AudioEncoderType::Opus => Arc::new(Mutex::new(OpusEncoder::new()?)),
+        };
+
+        self.audio_encoder = Some(enc);
+
+        Ok(audio_rx)
+    }
+}
+impl<V: VideoEncoder> Capture<V> {
     /// Enables capture streams to send their frames to their encoders
     pub fn start(&mut self) -> Result<()> {
-        self.pause_flag.store(false, Ordering::Release);
+        self.controls.resume();
         Ok(())
     }
 
     /// Temporarily stops the recording by blocking frames from being sent to the encoders
-    pub fn pause(&mut self) -> Result<()> {
-        self.pause_flag.store(true, Ordering::Release);
-        Ok(())
+    pub fn controls(&mut self) -> Arc<CaptureControls> {
+        Arc::clone(&self.controls)
     }
 
     /// Stop recording and drain the encoders of any last frames they have in their internal
     /// buffers. These frames are discarded.
     pub fn finish(&mut self) -> Result<()> {
-        self.pause_flag.store(true, Ordering::Release);
+        self.controls.pause();
         if let Some(ref mut enc) = self.video_encoder {
             enc.lock().unwrap().drain()?;
         }
@@ -300,7 +379,7 @@ impl<V: VideoEncoder + PipewireSPA> Capture<V> {
     /// If your goal is to temporarily stop recording use [`Self::pause`] or [`Self::finish`] + [`Self::reset`]
     pub fn close(&mut self) -> Result<()> {
         self.finish()?;
-        self.stop_flag.store(true, Ordering::Release);
+        self.controls.stop();
         if let Some(pw_vid) = &self.pw_video_terminate_tx {
             let _ = pw_vid.send(Terminate {});
         }
@@ -330,40 +409,6 @@ impl<V: VideoEncoder + PipewireSPA> Capture<V> {
 }
 
 impl Capture<DynamicEncoder> {
-    fn start_pipewire_audio(
-        &mut self,
-        audio_encoder_type: AudioEncoderType,
-        include_audio: bool,
-        video_ready: &Arc<AtomicBool>,
-        audio_ready: &Arc<AtomicBool>,
-    ) -> Result<Receiver<RawAudioFrame>> {
-        let (pw_audio_sender, pw_audio_recv) = pipewire::channel::channel();
-        self.pw_audio_terminate_tx = Some(pw_audio_sender);
-        let (audio_tx, audio_rx): (Sender<RawAudioFrame>, Receiver<RawAudioFrame>) = bounded(10);
-        if include_audio {
-            let pause_capture = Arc::clone(&self.pause_flag);
-            let video_r = Arc::clone(video_ready);
-            let audio_r = Arc::clone(audio_ready);
-            let pw_audio_worker = std::thread::spawn(move || -> Result<()> {
-                log::debug!("Starting audio stream");
-                let audio_cap = AudioCapture::new(video_r, audio_r);
-                audio_cap.run(audio_tx, pw_audio_recv, pause_capture)?;
-                Ok(())
-            });
-
-            self.worker_handles.push(pw_audio_worker);
-
-            let enc: Arc<Mutex<dyn AudioEncoder + Send>> = match audio_encoder_type {
-                AudioEncoderType::Opus => Arc::new(Mutex::new(OpusEncoder::new()?)),
-            };
-
-            self.audio_encoder = Some(enc);
-        } else {
-            audio_ready.store(true, Ordering::Release);
-        }
-        Ok(audio_rx)
-    }
-
     pub fn new(
         video_encoder_type: Option<VideoEncoderType>,
         audio_encoder_type: AudioEncoderType,
@@ -373,8 +418,7 @@ impl Capture<DynamicEncoder> {
         target_fps: u64,
     ) -> Result<Self> {
         let mut _self = Self {
-            stop_flag: Arc::new(AtomicBool::new(false)),
-            pause_flag: Arc::new(AtomicBool::new(true)),
+            controls: Arc::new(CaptureControls::from_fps(target_fps)),
             worker_handles: Vec::new(),
             video_encoder: None,
             audio_encoder: None,
@@ -382,44 +426,35 @@ impl Capture<DynamicEncoder> {
             pw_audio_terminate_tx: None,
         };
 
-        let encoder_type = resolve_video_encoder(video_encoder_type)?;
-        let (frame_rx, video_ready, audio_ready, resolution) =
-            _self.start_pipewire_video(include_cursor)?;
+        let (frame_rx, ready_state, resolution) = _self.start_pipewire_video(include_cursor)?;
 
-        let video_encoder =
-            DynamicEncoder::new(encoder_type, resolution.width, resolution.height, quality)?;
+        _self.video_encoder = Some(Arc::new(Mutex::new(DynamicEncoder::new(
+            video_encoder_type,
+            resolution.width,
+            resolution.height,
+            quality,
+        )?)));
 
-        let audio_rx = _self.start_pipewire_audio(
-            audio_encoder_type,
-            include_audio,
-            &video_ready,
-            &audio_ready,
-        )?;
-
-        // Wait until both threads are ready
-        while !audio_ready.load(Ordering::Acquire) || !video_ready.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
         if include_audio {
+            println!("including audio");
+            let audio_rx =
+                _self.start_pipewire_audio(audio_encoder_type, Arc::clone(&ready_state))?;
+            // Wait until both either threads are ready
+            ready_state.wait_for_both();
             let audio_loop = audio_encoding_loop(
                 Arc::clone(_self.audio_encoder.as_ref().unwrap()),
                 audio_rx,
-                Arc::clone(&_self.stop_flag),
-                Arc::clone(&_self.pause_flag),
+                Arc::clone(&_self.controls),
             );
 
             _self.worker_handles.push(audio_loop);
+        } else {
+            println!("No audio");
+            ready_state.audio.store(true, Ordering::Release);
+            ready_state.wait_for_both();
         }
 
-        let (video_encoder, video_loop) = start_video_loop(
-            video_encoder,
-            frame_rx,
-            Arc::clone(&_self.stop_flag),
-            Arc::clone(&_self.pause_flag),
-            target_fps,
-        );
-        _self.video_encoder = Some(video_encoder);
-        _self.worker_handles.push(video_loop);
+        DynamicEncoder::start_processing(&mut _self, frame_rx)?;
 
         log::info!("Capture started successfully.");
         Ok(_self)
@@ -457,7 +492,12 @@ impl Capture<DynamicEncoder> {
     /// # Examples
     ///
     /// ```
-    /// let mut output = ffmpeg::format::output(&filename)?;
+    /// # use waycap_rs::pipeline::builder::CaptureBuilder;
+    /// # use waycap_rs::types::error::Result;
+    /// # fn thing() -> Result<()>{
+    /// # let filename = "";
+    /// # let mut capture = CaptureBuilder::new().build()?;
+    /// let mut output = ffmpeg_next::format::output(&filename)?;
     ///
     /// capture.with_video_encoder(|enc| {
     ///     if let Some(video_encoder) = enc {
@@ -467,6 +507,8 @@ impl Capture<DynamicEncoder> {
     ///     }
     /// });
     /// output.write_header()?;
+    /// # Ok(())}
+    /// ```
     pub fn with_video_encoder<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Option<ffmpeg_next::encoder::Video>) -> R,
@@ -484,7 +526,12 @@ impl Capture<DynamicEncoder> {
     /// # Examples
     ///
     /// ```
-    /// let mut output = ffmpeg::format::output(&filename)?;
+    /// # use waycap_rs::pipeline::builder::CaptureBuilder;
+    /// # use waycap_rs::types::error::Result;
+    /// # fn thing() -> Result<()>{
+    /// # let filename = "";
+    /// # let mut capture = CaptureBuilder::new().build()?;
+    /// let mut output = ffmpeg_next::format::output(&filename)?;
     /// capture.with_audio_encoder(|enc| {
     ///     if let Some(audio_encoder) = enc {
     ///         let mut audio_stream = output.add_stream(audio_encoder.codec().unwrap()).unwrap();
@@ -494,6 +541,8 @@ impl Capture<DynamicEncoder> {
     ///     }
     /// });
     /// output.write_header()?;
+    /// # Ok(())}
+    /// ```
     pub fn with_audio_encoder<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Option<ffmpeg_next::encoder::Audio>) -> R,
@@ -505,27 +554,7 @@ impl Capture<DynamicEncoder> {
     }
 }
 
-fn resolve_video_encoder(video_encoder_type: Option<VideoEncoderType>) -> Result<VideoEncoderType> {
-    let encoder_type = match video_encoder_type {
-        Some(typ) => typ,
-        None => {
-            // Dummy dimensions we just use this go get GPU vendor then drop it
-            let dummy_context = EglContext::new(100, 100)?;
-            match dummy_context.get_gpu_vendor() {
-                GpuVendor::NVIDIA => VideoEncoderType::H264Nvenc,
-                GpuVendor::AMD | GpuVendor::INTEL => VideoEncoderType::H264Vaapi,
-                GpuVendor::UNKNOWN => {
-                    return Err(WaycapError::Init(
-                        "Unknown/Unimplemented GPU vendor".to_string(),
-                    ));
-                }
-            }
-        }
-    };
-    Ok(encoder_type)
-}
-
-impl<V: VideoEncoder + PipewireSPA> Drop for Capture<V> {
+impl<V: VideoEncoder> Drop for Capture<V> {
     fn drop(&mut self) {
         let _ = self.close();
 
@@ -539,14 +568,13 @@ impl<V: VideoEncoder + PipewireSPA> Drop for Capture<V> {
 fn audio_encoding_loop(
     audio_encoder: Arc<Mutex<dyn AudioEncoder + Send>>,
     audio_recv: Receiver<RawAudioFrame>,
-    stop: Arc<AtomicBool>,
-    pause: Arc<AtomicBool>,
+    controls: Arc<CaptureControls>,
 ) -> std::thread::JoinHandle<Result<()>> {
     std::thread::spawn(move || -> Result<()> {
         // CUDA contexts are thread local so set ours to this thread
 
-        while !stop.load(Ordering::Acquire) {
-            if pause.load(Ordering::Acquire) {
+        while !controls.is_stopped() {
+            if controls.is_paused() {
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }

@@ -31,6 +31,8 @@ fn main() -> Result<()> {
 
     let mut capture = CaptureBuilder::new()
         .with_quality_preset(QualityPreset::Medium)
+        .with_audio()
+        .with_audio_encoder(AudioEncoder::Opus)
         .with_cursor_shown()
         .build()?;
 

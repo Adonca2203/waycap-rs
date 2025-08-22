@@ -1,7 +1,6 @@
 use std::{
     os::fd::{FromRawFd, OwnedFd, RawFd},
     sync::{
-        atomic::AtomicBool,
         mpsc::{self},
         Arc,
     },
@@ -15,8 +14,7 @@ use pipewire::{
     main_loop::MainLoop,
     spa::{
         buffer::{Data, DataType},
-        pod::{Property, PropertyFlags},
-        utils::{Choice, ChoiceEnum, ChoiceFlags, Direction},
+        utils::Direction,
     },
     stream::{Stream, StreamFlags, StreamListener, StreamState},
     sys::pw_stream_get_nsec,
@@ -29,8 +27,7 @@ use crate::{
     types::{
         error::{Result, WaycapError},
         video_frame::RawVideoFrame,
-    },
-    Resolution,
+    }, CaptureControls, ReadyState, Resolution
 };
 
 use super::Terminate;
@@ -62,9 +59,8 @@ impl VideoCapture {
     pub fn new(
         pipewire_fd: RawFd,
         stream_node: u32,
-        video_ready: Arc<AtomicBool>,
-        audio_ready: Arc<AtomicBool>,
-        saving: Arc<AtomicBool>,
+        ready_state: Arc<ReadyState>,
+        controls: Arc<CaptureControls>,
         resolution_sender: mpsc::Sender<Resolution>,
         frame_tx: Sender<RawVideoFrame>,
         termination_recv: pw::channel::Receiver<Terminate>,
@@ -78,9 +74,8 @@ impl VideoCapture {
         let stream_listener = Self::setup_stream_listener(
             &mut stream,
             UserData::default(),
-            &video_ready,
-            &audio_ready,
-            &saving,
+            ready_state,
+            &controls,
             resolution_sender.clone(),
             frame_tx.clone(),
         )?;
@@ -127,46 +122,41 @@ impl VideoCapture {
     fn setup_stream_listener(
         stream: &mut Stream,
         data: UserData,
-        video_ready: &Arc<AtomicBool>,
-        audio_ready: &Arc<AtomicBool>,
-        saving: &Arc<AtomicBool>,
+        ready_state: Arc<ReadyState>,
+        controls: &Arc<CaptureControls>,
         resolution_sender: mpsc::Sender<Resolution>,
         frame_tx: Sender<RawVideoFrame>,
     ) -> Result<StreamListener<UserData>> {
-        let ready_clone = Arc::clone(video_ready);
-        let audio_ready_clone = Arc::clone(audio_ready);
-        let saving_clone = Arc::clone(saving);
+        let ready_state_clone = Arc::clone(&ready_state);
+        let controls_clone = Arc::clone(controls);
 
         let stream_listener = stream
             .add_local_listener_with_user_data(data)
             .state_changed(move |_, _, old, new| {
                 log::info!("Video Stream State Changed: {old:?} -> {new:?}");
-                ready_clone.store(
+                ready_state.video.store(
                     new == StreamState::Streaming,
                     std::sync::atomic::Ordering::Release,
                 );
             })
-            .param_changed(move |stream_ref, user_data, id, param| {
+            .param_changed(move |_, user_data, id, param| {
                 let Some(param) = param else {
-                    println!("no param");
                     return;
                 };
 
                 if id != pw::spa::param::ParamType::Format.as_raw() {
-                    println!("wrong format: {id:?}");
                     return;
                 }
 
                 let (media_type, media_subtype) =
                     match pw::spa::param::format_utils::parse_format(param) {
                         Ok(v) => v,
-                        Err(_) => {println!("wrong parse format"); return},
+                        Err(_) => return,
                     };
 
                 if media_type != pw::spa::param::format::MediaType::Video
                     || media_subtype != pw::spa::param::format::MediaSubtype::Raw
                 {   
-                    println!("wrong type");
                     return;
                 }
 
@@ -203,24 +193,18 @@ impl VideoCapture {
                     user_data.video_format.framerate().num,
                     user_data.video_format.framerate().denom
                 );
-                // build_stream_param
-                // stream_ref.update_params(&mut     ).unwrap();
-
             })
             .process(move |stream, udata| {
                 match stream.dequeue_buffer() {
                     None => log::debug!("out of buffers"),
                     Some(mut buffer) => {
                         // Wait until audio is streaming before we try to process
-                        if !audio_ready_clone.load(std::sync::atomic::Ordering::Acquire)
-                            || saving_clone.load(std::sync::atomic::Ordering::Acquire)
-                        {
+                        if !ready_state_clone.audio_ready() || controls_clone.skip_processing() {
                             return;
                         }
 
                         let datas = buffer.datas_mut();
                         if datas.is_empty() {
-                            println!("empty");
                             return;
                         }
 

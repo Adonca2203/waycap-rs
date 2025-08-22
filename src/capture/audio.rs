@@ -1,9 +1,6 @@
-use std::{
-    process::Command,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::{process::Command, sync::Arc};
 
-use crate::types::audio_frame::RawAudioFrame;
+use crate::{types::audio_frame::RawAudioFrame, CaptureControls, ReadyState};
 use crossbeam::channel::Sender;
 use pipewire::{
     self as pw,
@@ -28,24 +25,20 @@ struct UserData {
 }
 
 pub struct AudioCapture {
-    video_ready: Arc<AtomicBool>,
-    audio_ready: Arc<AtomicBool>,
+    ready_state: Arc<ReadyState>,
 }
 
 // TODO: Similar approach to video capture in how the struct should look
 impl AudioCapture {
-    pub fn new(video_ready: Arc<AtomicBool>, audio_ready: Arc<AtomicBool>) -> Self {
-        Self {
-            video_ready,
-            audio_ready,
-        }
+    pub fn new(ready_state: Arc<ReadyState>) -> Self {
+        Self { ready_state }
     }
 
     pub fn run(
         &self,
         audio_sender: Sender<RawAudioFrame>,
         termination_recv: pw::channel::Receiver<Terminate>,
-        saving: Arc<AtomicBool>,
+        controls: Arc<CaptureControls>,
     ) -> Result<(), pw::Error> {
         let pw_loop = MainLoop::new(None)?;
         let terminate_loop = pw_loop.clone();
@@ -79,13 +72,13 @@ impl AudioCapture {
             },
         )?;
 
-        let video_ready_clone = Arc::clone(&self.video_ready);
-        let audio_ready_clone = Arc::clone(&self.audio_ready);
+        let ready_state_a = Arc::clone(&self.ready_state);
+        let ready_state_b = Arc::clone(&self.ready_state);
         let _audio_stream_shared_data_listener = audio_stream
             .add_local_listener_with_user_data(data)
             .state_changed(move |_, _, old, new| {
                 log::info!("Audio Stream State Changed: {old:?} -> {new:?}");
-                audio_ready_clone.store(
+                ready_state_a.audio.store(
                     new == StreamState::Streaming,
                     std::sync::atomic::Ordering::Release,
                 );
@@ -125,9 +118,7 @@ impl AudioCapture {
                 None => log::debug!("Out of audio buffers"),
                 Some(mut buffer) => {
                     // Wait until video is streaming before we try to process
-                    if !video_ready_clone.load(std::sync::atomic::Ordering::Acquire)
-                        || saving.load(std::sync::atomic::Ordering::Acquire)
-                    {
+                    if !ready_state_b.video_ready() || controls.skip_processing() {
                         return;
                     }
 

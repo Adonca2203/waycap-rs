@@ -1,17 +1,24 @@
-use std::ptr::null_mut;
-
-use crate::{encoders::video::PipewireSPA, types::video_frame::RawVideoFrame, VideoEncoder};
+use crate::{
+    encoders::video::{PipewireSPA, ProcessingThread},
+    types::video_frame::RawVideoFrame,
+    VideoEncoder,
+};
 use crossbeam::channel::{Receiver, Sender};
-use image::RgbaImage;
 
 use crate::types::error::Result;
 use pipewire as pw;
-pub struct ImageEncoder {
+
+/// "Encoder" which outputs image::RgbaImage
+///
+/// This is entirely CPU side, and won't ever be as fast as [`NvencEncoder`] or [`VaapiEncoder`].
+/// Don't use this to record video!
+/// It will likely benefit from compile time optimizations a lot, due to the BGRA to RGBA image conversion.
+pub struct RgbaImageEncoder {
     image_sender: Sender<image::RgbaImage>,
     image_receiver: Receiver<image::RgbaImage>,
 }
 
-impl Default for ImageEncoder {
+impl Default for RgbaImageEncoder {
     fn default() -> Self {
         let (image_sender, image_receiver) = crossbeam::channel::bounded(10);
         Self {
@@ -21,9 +28,8 @@ impl Default for ImageEncoder {
     }
 }
 
-impl VideoEncoder for ImageEncoder {
-    type Output = image::RgbaImage;
-    fn process(&mut self, frame: &RawVideoFrame) -> Result<()> {
+impl ProcessingThread for RgbaImageEncoder {
+    fn process(&mut self, frame: RawVideoFrame) -> Result<()> {
         let mut raw = frame.data.clone();
         bgra_to_rgba_inplace(&mut raw);
         let image =
@@ -40,6 +46,10 @@ impl VideoEncoder for ImageEncoder {
         }
         Ok(())
     }
+}
+
+impl VideoEncoder for RgbaImageEncoder {
+    type Output = image::RgbaImage;
 
     fn reset(&mut self) -> crate::types::error::Result<()> {
         Ok(())
@@ -60,7 +70,7 @@ impl VideoEncoder for ImageEncoder {
     }
 }
 
-impl PipewireSPA for ImageEncoder {
+impl PipewireSPA for RgbaImageEncoder {
     fn get_spa_definition() -> Result<pipewire::spa::pod::Object> {
         Ok(pw::spa::pod::object!(
             pw::spa::utils::SpaTypes::ObjectParamFormat,
@@ -110,9 +120,19 @@ impl PipewireSPA for ImageEncoder {
         ))
     }
 }
+
+/// BGRA to RGBA pixel buffer conversion
+///
+/// Will likely benefit from compile time optimizations a lot, especially with SIMD instruction sets enabled.
+/// `RUSTFLAGS="-C target-cpu=x86-64-v3"` is a relatively safe bet, as according to steam hardware survey ~95% of people have it.
 pub fn bgra_to_rgba_inplace(buf: &mut [u8]) {
-    let loops = buf.len() / 4;
-    for i in 0..loops {
-        buf.swap(i, i + 2);
+    // adapted from: Source: https://users.rust-lang.org/t/the-fastest-way-to-copy-a-buffer-bgra-to-rgba/126651/11
+    let (chunked, _) = buf.as_chunks_mut::<4>();
+
+    for p in chunked {
+        let bgra = u32::from_be_bytes(*p);
+        let argb = bgra.swap_bytes();
+        let rgba = argb.rotate_left(8);
+        *p = rgba.to_be_bytes();
     }
 }

@@ -1,4 +1,4 @@
-use std::{ptr::null_mut, time::Duration};
+use std::ptr::null_mut;
 
 use crossbeam::channel::{bounded, Receiver, Sender};
 use cust::{
@@ -22,13 +22,13 @@ use ffmpeg_next::{
 use pipewire as pw;
 
 use crate::{
-    encoders::video::{PipewireSPA, VideoEncoder},
+    encoders::video::{PipewireSPA, ProcessingThread, VideoEncoder},
     types::{
         config::QualityPreset,
         error::{Result, WaycapError},
         video_frame::{EncodedVideoFrame, RawVideoFrame},
     },
-    utils::{calculate_dimensions, extract_dmabuf_planes, TIME_UNIT_NS},
+    utils::{extract_dmabuf_planes, TIME_UNIT_NS},
     waycap_egl::EglContext,
 };
 use khronos_egl::Image;
@@ -57,6 +57,9 @@ const NVIDIA_MODIFIERS: &[i64] = &[
     72057594037927935,
 ];
 
+/// Encoder which provides frames encoded using Nvenc
+///
+/// Only available for Nvidia GPUs
 pub struct NvencEncoder {
     encoder: Option<ffmpeg::codec::encoder::Video>,
     width: u32,
@@ -68,7 +71,7 @@ pub struct NvencEncoder {
 
     cuda_ctx: Context,
     graphics_resource: CUgraphicsResource,
-    egl_context: Option<EglContext>,
+    egl_context: Option<Box<EglContext>>, // boxed egl context because its huge
     egl_texture: u32,
 }
 
@@ -99,8 +102,37 @@ impl VideoEncoder for NvencEncoder {
         self.encoded_frame_recv.clone()
     }
 
-    fn process(&mut self, frame: &RawVideoFrame) -> Result<()> {
-        match process_dmabuf_frame(self.egl_context.as_ref().unwrap(), frame) {
+    fn drain(&mut self) -> Result<()> {
+        if let Some(ref mut encoder) = self.encoder {
+            // Drain encoder
+            encoder.send_eof()?;
+            let mut packet = ffmpeg::codec::packet::Packet::empty();
+            while encoder.receive_packet(&mut packet).is_ok() {} // Discard these frames
+        }
+        Ok(())
+    }
+
+    fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video> {
+        &self.encoder
+    }
+}
+impl ProcessingThread for NvencEncoder {
+    fn thread_setup(&mut self) -> Result<()> {
+        self.egl_context = Some(Box::new(EglContext::new(
+            self.width as i32,
+            self.height as i32,
+        )?));
+        self.make_current()?;
+        self.init_gl(None)?;
+        Ok(())
+    }
+
+    fn thread_teardown(&mut self) -> Result<()> {
+        self.egl_context.as_mut().unwrap().release_current()
+    }
+
+    fn process(&mut self, frame: RawVideoFrame) -> Result<()> {
+        match egl_img_from_dmabuf(self.egl_context.as_ref().unwrap(), &frame) {
             Ok(img) => {
                 if let Some(ref mut encoder) = self.encoder {
                     let mut cuda_frame = ffmpeg::util::frame::Video::new(
@@ -222,28 +254,8 @@ impl VideoEncoder for NvencEncoder {
         }
         Ok(())
     }
-
-    fn thread_setup(&mut self) -> Result<()> {
-        self.egl_context = Some(EglContext::new(self.width as i32, self.height as i32)?);
-        self.make_current()?;
-        self.init_gl(None)?;
-        Ok(())
-    }
-
-    fn drain(&mut self) -> Result<()> {
-        if let Some(ref mut encoder) = self.encoder {
-            // Drain encoder
-            encoder.send_eof()?;
-            let mut packet = ffmpeg::codec::packet::Packet::empty();
-            while encoder.receive_packet(&mut packet).is_ok() {} // Discard these frames
-        }
-        Ok(())
-    }
-
-    fn get_encoder(&self) -> &Option<ffmpeg::codec::encoder::Video> {
-        &self.encoder
-    }
 }
+
 impl PipewireSPA for NvencEncoder {
     fn get_spa_definition() -> Result<pw::spa::pod::Object> {
         let nvidia_mod_property = pw::spa::pod::Property {
@@ -314,15 +326,19 @@ impl PipewireSPA for NvencEncoder {
     }
 }
 
-fn process_dmabuf_frame(egl_ctx: &EglContext, raw_frame: &RawVideoFrame) -> Result<Image> {
+fn egl_img_from_dmabuf(egl_ctx: &EglContext, raw_frame: &RawVideoFrame) -> Result<Image> {
     let dma_buf_planes = extract_dmabuf_planes(raw_frame)?;
 
     let format = drm_fourcc::DrmFourcc::Argb8888 as u32;
-    let (width, height) = calculate_dimensions(raw_frame)?;
     let modifier = raw_frame.modifier;
 
-    let egl_image =
-        egl_ctx.create_image_from_dmabuf(&dma_buf_planes, format, width, height, modifier)?;
+    let egl_image = egl_ctx.create_image_from_dmabuf(
+        &dma_buf_planes,
+        format,
+        raw_frame.dimensions.width,
+        raw_frame.dimensions.height,
+        modifier,
+    )?;
 
     egl_ctx.update_texture_from_image(egl_image)?;
 
@@ -475,7 +491,7 @@ impl NvencEncoder {
         opts
     }
 
-    pub fn init_gl(&mut self, texture_id: Option<u32>) -> Result<()> {
+    fn init_gl(&mut self, texture_id: Option<u32>) -> Result<()> {
         self.egl_texture = match texture_id {
             Some(texture_id) => texture_id,
             None => {
@@ -516,8 +532,8 @@ impl NvencEncoder {
         Ok(())
     }
 
-    /// Set cuda and egl context to current thread
-    pub fn make_current(&self) -> Result<()> {
+    /// Set cuda  context to current thread
+    fn make_current(&self) -> Result<()> {
         unsafe { cuCtxSetCurrent(self.cuda_ctx.as_raw()) };
         Ok(())
     }
@@ -526,7 +542,13 @@ impl NvencEncoder {
 impl Drop for NvencEncoder {
     fn drop(&mut self) {
         if let Err(e) = self.drain() {
-            log::error!("Error while draining nvenc encoder during drop: {e:?}");
+            if let WaycapError::FFmpeg(ffmpeg::Error::Other { errno: 541478725 }) = e {
+                // This seems normal when a stream is empty,
+                // like when its been drained before (in Capture::finish for example)
+                // see: https://trac.ffmpeg.org/ticket/7290
+            } else {
+                log::error!("Error while draining nvenc encoder during drop: {e:?}");
+            }
         }
         self.drop_processor();
 

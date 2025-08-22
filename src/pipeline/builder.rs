@@ -1,5 +1,5 @@
 use crate::{
-    encoders::{dynamic_encoder::DynamicEncoder, video::VideoEncoder as VideoEncoderTrait},
+    encoders::dynamic_encoder::DynamicEncoder,
     types::{
         config::{AudioEncoder, QualityPreset, VideoEncoder},
         error::Result,
@@ -13,16 +13,6 @@ pub struct CaptureBuilder {
     quality_preset: Option<QualityPreset>,
     include_cursor: bool,
     include_audio: bool,
-    target_fps: u64,
-}
-
-pub struct CaptureBuilderRaw<V, C>
-where
-    V: VideoEncoderTrait,
-    C: FnOnce() -> V,
-{
-    make_processor: C,
-    include_cursor: bool,
     target_fps: u64,
 }
 
@@ -49,18 +39,6 @@ impl CaptureBuilder {
     pub fn with_video_encoder(mut self, encoder: VideoEncoder) -> Self {
         self.video_encoder = Some(encoder);
         self
-    }
-
-    pub fn with_raw_processor<V, C>(self, make_processor: C) -> CaptureBuilderRaw<V, C>
-    where
-        V: VideoEncoderTrait,
-        C: FnOnce() -> V,
-    {
-        CaptureBuilderRaw {
-            make_processor: make_processor,
-            include_cursor: self.include_cursor,
-            target_fps: self.target_fps,
-        }
     }
 
     /// Optional: Force use a specific audio encoder.

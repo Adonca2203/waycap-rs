@@ -1,7 +1,7 @@
 use std::ptr::null_mut;
 
 use crate::{
-    encoders::video::{PipewireSPA, VideoEncoder},
+    encoders::video::{PipewireSPA, ProcessingThread, VideoEncoder},
     types::{
         config::QualityPreset,
         error::{Result, WaycapError},
@@ -24,6 +24,7 @@ use pipewire as pw;
 
 use super::video::{create_hw_device, create_hw_frame_ctx, GOP_SIZE};
 
+/// Encoder which encodes frames using Vaapi
 pub struct VaapiEncoder {
     encoder: Option<ffmpeg::codec::encoder::Video>,
     width: u32,
@@ -35,30 +36,8 @@ pub struct VaapiEncoder {
     filter_graph: Option<ffmpeg::filter::Graph>,
 }
 
-impl VideoEncoder for VaapiEncoder {
-    type Output = EncodedVideoFrame;
-    fn reset(&mut self) -> Result<()> {
-        self.drop_processor();
-        let new_encoder =
-            Self::create_encoder(self.width, self.height, &self.encoder_name, &self.quality)?;
-
-        let new_filter_graph = Self::create_filter_graph(&new_encoder, self.width, self.height)?;
-
-        self.encoder = Some(new_encoder);
-        self.filter_graph = Some(new_filter_graph);
-        Ok(())
-    }
-
-    fn drop_processor(&mut self) {
-        self.encoder.take();
-        self.filter_graph.take();
-    }
-
-    fn output(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
-        self.encoded_frame_recv.clone()
-    }
-
-    fn process(&mut self, frame: &RawVideoFrame) -> Result<()> {
+impl ProcessingThread for VaapiEncoder {
+    fn process(&mut self, frame: RawVideoFrame) -> Result<()> {
         if let Some(ref mut encoder) = self.encoder {
             if let Some(fd) = frame.dmabuf_fd {
                 let mut drm_frame = ffmpeg::util::frame::Video::new(
@@ -146,6 +125,31 @@ impl VideoEncoder for VaapiEncoder {
         }
         Ok(())
     }
+}
+
+impl VideoEncoder for VaapiEncoder {
+    type Output = EncodedVideoFrame;
+    fn reset(&mut self) -> Result<()> {
+        self.drop_processor();
+        let new_encoder =
+            Self::create_encoder(self.width, self.height, &self.encoder_name, &self.quality)?;
+
+        let new_filter_graph = Self::create_filter_graph(&new_encoder, self.width, self.height)?;
+
+        self.encoder = Some(new_encoder);
+        self.filter_graph = Some(new_filter_graph);
+        Ok(())
+    }
+
+    fn drop_processor(&mut self) {
+        self.encoder.take();
+        self.filter_graph.take();
+    }
+
+    fn output(&mut self) -> Option<Receiver<EncodedVideoFrame>> {
+        self.encoded_frame_recv.clone()
+    }
+
     /// Drain the filter graph and encoder of any remaining frames it is processing
     fn drain(&mut self) -> Result<()> {
         if let Some(ref mut encoder) = self.encoder {
