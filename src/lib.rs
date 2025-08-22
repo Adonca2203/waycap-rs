@@ -143,6 +143,7 @@ pub struct Capture<V: VideoEncoder + Send> {
     pw_audio_terminate_tx: Option<pipewire::channel::Sender<Terminate>>,
 }
 
+/// Controls for the capture, allows you to pause/resume processing
 #[derive(Debug)]
 pub struct CaptureControls {
     stop_flag: AtomicBool,
@@ -171,6 +172,8 @@ impl CaptureControls {
         self.stop_flag.load(Ordering::Acquire)
     }
     /// Stop processing
+    ///
+    /// This is final, use [`CaptureControls::pause`] if you want to resume later.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Release);
     }
@@ -191,6 +194,7 @@ impl CaptureControls {
     }
 }
 
+/// State of audio/video readiness, used internally
 #[derive(Default, Debug)]
 pub struct ReadyState {
     audio: AtomicBool,
