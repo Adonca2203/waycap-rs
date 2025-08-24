@@ -13,11 +13,13 @@ use pipewire::{
     core::{Core, Listener},
     main_loop::MainLoop,
     spa::{
-        buffer::{Data, DataType},
-        utils::Direction,
+        buffer::{Data, DataType, MetaHeader},
+        param::ParamType,
+        pod::Property,
+        sys::{SPA_META_Header, SPA_PARAM_META_size, SPA_PARAM_META_type},
+        utils::{Direction, SpaTypes},
     },
     stream::{Stream, StreamFlags, StreamListener, StreamState},
-    sys::pw_stream_get_nsec,
 };
 use pw::{properties::properties, spa};
 
@@ -27,12 +29,11 @@ use crate::{
     types::{
         error::{Result, WaycapError},
         video_frame::RawVideoFrame,
-    }, CaptureControls, ReadyState, Resolution
+    },
+    CaptureControls, ReadyState, Resolution,
 };
 
 use super::Terminate;
-
-
 
 pub struct VideoCapture {
     termination_recv: Option<pw::channel::Receiver<Terminate>>,
@@ -156,7 +157,7 @@ impl VideoCapture {
 
                 if media_type != pw::spa::param::format::MediaType::Video
                     || media_subtype != pw::spa::param::format::MediaSubtype::Raw
-                {   
+                {
                     return;
                 }
 
@@ -172,7 +173,6 @@ impl VideoCapture {
                 );
 
                 let (width, height) = (
-
                     user_data.video_format.size().width,
                     user_data.video_format.size().height,
                     );
@@ -203,6 +203,12 @@ impl VideoCapture {
                             return;
                         }
 
+                        let timestamp = if let Some(metas) = buffer.find_meta::<MetaHeader>() {
+                            metas.pts()
+                        } else {
+                            0
+                        };
+
                         let datas = buffer.datas_mut();
                         if datas.is_empty() {
                             return;
@@ -214,7 +220,7 @@ impl VideoCapture {
 
                         match frame_tx.try_send(RawVideoFrame {
                             data: data.data().unwrap_or_default().to_vec(),
-                            timestamp: unsafe { pw_stream_get_nsec(stream.as_raw_ptr())} as i64,
+                            timestamp,
                             dmabuf_fd: fd,
                             stride: data.chunk().stride(),
                             offset: data.chunk().offset(),
@@ -260,7 +266,32 @@ impl VideoCapture {
         .0
         .into_inner();
 
-        let mut video_params = [Pod::from_bytes(&video_spa_values).unwrap()];
+        let metas_obj = pw::spa::pod::object!(
+            SpaTypes::ObjectParamMeta,
+            ParamType::Meta,
+            Property::new(
+                SPA_PARAM_META_type,
+                pw::spa::pod::Value::Id(pw::spa::utils::Id(SPA_META_Header))
+            ),
+            Property::new(
+                SPA_PARAM_META_size,
+                pw::spa::pod::Value::Int(size_of::<pw::spa::sys::spa_meta_header>() as i32)
+            ),
+        );
+
+        let metas_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &pw::spa::pod::Value::Object(metas_obj),
+        )
+        .unwrap()
+        .0
+        .into_inner();
+
+        let mut video_params = [
+            Pod::from_bytes(&video_spa_values).unwrap(),
+            Pod::from_bytes(&metas_values).unwrap(),
+        ];
+
         stream.connect(
             Direction::Input,
             Some(stream_node),

@@ -19,7 +19,7 @@ drm-fourcc = "2.2.0"
 ffmpeg-next = { version = "7.1.0", features = ["codec", "format"] }
 libc = "0.2.172"
 log = "0.4.27"
-pipewire = "0.8.0"
+pipewire = { git = "https://gitlab.freedesktop.org/Adonca2203/pipewire-rs", branch = "metas"}
 portal-screencast-waycap = "1.0.0"
 simple-logging = "2.0.2"
 gl = "0.14.0"
