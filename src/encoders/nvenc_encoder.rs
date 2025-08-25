@@ -4,9 +4,10 @@ use crossbeam::channel::{bounded, Receiver, Sender};
 use cust::{
     prelude::Context,
     sys::{
-        cuCtxSetCurrent, cuGraphicsMapResources, cuGraphicsResourceSetMapFlags_v2,
-        cuGraphicsSubResourceGetMappedArray, cuGraphicsUnmapResources,
-        cuGraphicsUnregisterResource, cuMemcpy2D_v2, CUDA_MEMCPY2D_v2, CUarray, CUdeviceptr,
+        cuCtxSetCurrent, cuExternalMemoryGetMappedMipmappedArray, cuGraphicsMapResources,
+        cuGraphicsResourceSetMapFlags_v2, cuGraphicsSubResourceGetMappedArray,
+        cuGraphicsUnmapResources, cuGraphicsUnregisterResource, cuImportExternalMemory,
+        cuMemcpy2D_v2, CUDA_MEMCPY2D_v2, CUarray, CUdeviceptr, CUexternalMemory,
         CUgraphicsResource, CUmemorytype, CUresult, CUDA_EXTERNAL_MEMORY_HANDLE_DESC,
     },
 };
@@ -76,6 +77,7 @@ pub struct NvencEncoder {
     egl_texture: u32,
 
     vulkan_context: Box<VulkanContext>,
+    external_mem: CUexternalMemory,
 }
 
 unsafe impl Send for NvencEncoder {}
@@ -121,12 +123,12 @@ impl VideoEncoder for NvencEncoder {
 }
 impl ProcessingThread for NvencEncoder {
     fn thread_setup(&mut self) -> Result<()> {
-        self.egl_context = Some(Box::new(EglContext::new(
-            self.width as i32,
-            self.height as i32,
-        )?));
-        self.make_current()?;
-        self.init_gl(None)?;
+        // self.egl_context = Some(Box::new(EglContext::new(
+        //     self.width as i32,
+        //     self.height as i32,
+        // )?));
+        // self.make_current()?;
+        // self.init_gl(None)?;
         Ok(())
     }
 
@@ -136,8 +138,14 @@ impl ProcessingThread for NvencEncoder {
 
     fn process(&mut self, frame: RawVideoFrame) -> Result<()> {
         if let Some(ref mut encoder) = self.encoder {
-            self.vulkan_context.update_image_from_dmabuf(&frame).unwrap();
-        } 
+            self.vulkan_context
+                .update_image_from_dmabuf(&frame)
+                .unwrap();
+
+            if let Some(image) = self.vulkan_context.get_image() {
+                // TODO: Figure out how to map vulkan image to CUDA AVFrame
+            }
+        }
 
         // match egl_img_from_dmabuf(self.egl_context.as_ref().unwrap(), &frame) {
         //     Ok(img) => {
@@ -364,6 +372,31 @@ impl NvencEncoder {
         let mut vulkan_context = VulkanContext::new().unwrap();
         vulkan_context.initalize_image(width, height).unwrap();
 
+        let mut cuda_external_mem: CUexternalMemory = null_mut();
+        if let Some(image) = vulkan_context.get_image() {
+            let mem_handle_desc = CUDA_EXTERNAL_MEMORY_HANDLE_DESC {
+                type_:
+                    cust::sys::CUexternalMemoryHandleType::CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+                handle: cust::sys::CUDA_EXTERNAL_MEMORY_HANDLE_DESC_st__bindgen_ty_1 {
+                    fd: image.persistent_image_memory_fd,
+                },
+                size: image.persistent_image_size,
+                flags: 0,
+                reserved: [0; 16],
+            };
+
+            let result =
+                unsafe { cuImportExternalMemory(&mut cuda_external_mem, &mem_handle_desc) };
+
+            if result != CUresult::CUDA_SUCCESS {
+                return Err(WaycapError::Init(
+                    format!("Failed to import external mem: {result:?}").into(),
+                ));
+            }
+        } else {
+            return Err(WaycapError::Init("Image not created".into()));
+        }
+
         Ok(Self {
             encoder: Some(encoder),
             width,
@@ -377,6 +410,7 @@ impl NvencEncoder {
             egl_context: None,
             egl_texture: 0,
             vulkan_context: Box::new(vulkan_context),
+            external_mem: cuda_external_mem,
         })
     }
 

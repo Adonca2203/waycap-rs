@@ -157,6 +157,7 @@ impl VulkanContext {
             ash::khr::external_memory::NAME.as_ptr(),
             ash::khr::external_memory_fd::NAME.as_ptr(),
             ash::ext::external_memory_dma_buf::NAME.as_ptr(),
+            ash::ext::image_drm_format_modifier::NAME.as_ptr(),
         ];
 
         let device_create_info = vk::DeviceCreateInfo::default()
@@ -323,11 +324,37 @@ impl VulkanContext {
     ) -> Result<(), Box<dyn std::error::Error>> {
         assert!(raw_image.dmabuf_fd.is_some());
 
+        let original_fd = raw_image.dmabuf_fd.unwrap();
+
+        // Need to copy the FD so pipewire can reuse it while vulkan does its thing
+        let duplicated_fd = unsafe { libc::dup(original_fd) };
+        if duplicated_fd == -1 {
+            return Err("Failed to duplicate DMA-BUF file descriptor".into());
+        }
+
+        unsafe {
+            self.device.device_wait_idle()?;
+        }
+
         let mut external_memory_create_info = vk::ExternalMemoryImageCreateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
 
+        let plane_layout = &[vk::SubresourceLayout {
+            offset: raw_image.offset as u64,
+            size: 0,
+            row_pitch: raw_image.stride as u64,
+            array_pitch: 0,
+            depth_pitch: 0,
+        }];
+
+        let mut drm_format_modifier_info =
+            vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+                .drm_format_modifier(raw_image.modifier as u64)
+                .plane_layouts(plane_layout);
+
         let image_create_info = vk::ImageCreateInfo::default()
             .push_next(&mut external_memory_create_info)
+            .push_next(&mut drm_format_modifier_info)
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::B8G8R8A8_UNORM)
             .extent(vk::Extent3D {
@@ -338,19 +365,23 @@ impl VulkanContext {
             .mip_levels(1)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::LINEAR)
+            .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
             .usage(vk::ImageUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
-        let source_image = unsafe { self.device.create_image(&image_create_info, None)? };
-
-        let mut import_memory_fd_info = vk::ImportMemoryFdInfoKHR::default()
-            .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-            .fd(raw_image.dmabuf_fd.unwrap());
+        let source_image = match unsafe { self.device.create_image(&image_create_info, None) } {
+            Ok(img) => {
+                img
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
 
         let memory_requirements =
             unsafe { self.device.get_image_memory_requirements(source_image) };
+
         let memory_properties = unsafe {
             self.instance
                 .get_physical_device_memory_properties(self.physical_device)
@@ -358,30 +389,74 @@ impl VulkanContext {
 
         let memory_type_index = Self::find_memory_type(
             memory_requirements.memory_type_bits,
-            vk::MemoryPropertyFlags::empty(),
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
             &memory_properties,
-        )?;
+        )
+        .or_else(|_| {
+            log::debug!("DEVICE_LOCAL not found, trying empty flags");
+            Self::find_memory_type(
+                memory_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::empty(),
+                &memory_properties,
+            )
+        })
+        .map_err(|e| {
+            unsafe {
+                self.device.destroy_image(source_image, None);
+            }
+            e
+        })?;
+
+        let mut import_memory_fd_info = vk::ImportMemoryFdInfoKHR::default()
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+            .fd(duplicated_fd);
 
         let allocate_info = vk::MemoryAllocateInfo::default()
             .push_next(&mut import_memory_fd_info)
             .allocation_size(memory_requirements.size)
             .memory_type_index(memory_type_index);
 
-        let source_memory = unsafe { self.device.allocate_memory(&allocate_info, None)? };
-        unsafe {
-            self.device
-                .bind_image_memory(source_image, source_memory, 0)?
+        let source_memory = match unsafe { self.device.allocate_memory(&allocate_info, None) } {
+            Ok(mem) => {
+                mem
+            }
+            Err(e) => {
+                unsafe {
+                    self.device.destroy_image(source_image, None);
+                }
+                return Err(format!("Memory allocation failed: {:?}", e).into());
+            }
         };
 
-        self.copy_image_to_persistent(
+        unsafe {
+            if let Err(e) = self
+                .device
+                .bind_image_memory(source_image, source_memory, 0)
+            {
+                log::error!("Failed to bind image memory: {:?}", e);
+                self.device.free_memory(source_memory, None);
+                self.device.destroy_image(source_image, None);
+                return Err(e.into());
+            }
+        }
+
+        if let Err(e) = self.copy_image_to_persistent(
             source_image,
             raw_image.dimensions.width,
             raw_image.dimensions.height,
-        )?;
+        ) {
+            unsafe {
+                self.device.free_memory(source_memory, None);
+                self.device.destroy_image(source_image, None);
+            }
+            return Err(e);
+        }
 
         unsafe {
             self.device.free_memory(source_memory, None);
             self.device.destroy_image(source_image, None);
+
+            self.device.device_wait_idle()?;
         }
 
         Ok(())
