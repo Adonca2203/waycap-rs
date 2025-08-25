@@ -7,7 +7,7 @@ use cust::{
         cuCtxSetCurrent, cuGraphicsMapResources, cuGraphicsResourceSetMapFlags_v2,
         cuGraphicsSubResourceGetMappedArray, cuGraphicsUnmapResources,
         cuGraphicsUnregisterResource, cuMemcpy2D_v2, CUDA_MEMCPY2D_v2, CUarray, CUdeviceptr,
-        CUgraphicsResource, CUmemorytype, CUresult,
+        CUgraphicsResource, CUmemorytype, CUresult, CUDA_EXTERNAL_MEMORY_HANDLE_DESC,
     },
 };
 use ffmpeg_next::{
@@ -30,6 +30,7 @@ use crate::{
     },
     utils::{extract_dmabuf_planes, TIME_UNIT_NS},
     waycap_egl::EglContext,
+    waycap_vulkan::VulkanContext,
 };
 use khronos_egl::Image;
 
@@ -73,6 +74,8 @@ pub struct NvencEncoder {
     graphics_resource: CUgraphicsResource,
     egl_context: Option<Box<EglContext>>, // boxed egl context because its huge
     egl_texture: u32,
+
+    vulkan_context: Box<VulkanContext>,
 }
 
 unsafe impl Send for NvencEncoder {}
@@ -132,126 +135,130 @@ impl ProcessingThread for NvencEncoder {
     }
 
     fn process(&mut self, frame: RawVideoFrame) -> Result<()> {
-        match egl_img_from_dmabuf(self.egl_context.as_ref().unwrap(), &frame) {
-            Ok(img) => {
-                if let Some(ref mut encoder) = self.encoder {
-                    let mut cuda_frame = ffmpeg::util::frame::Video::new(
-                        ffmpeg_next::format::Pixel::CUDA,
-                        encoder.width(),
-                        encoder.height(),
-                    );
+        if let Some(ref mut encoder) = self.encoder {
+            self.vulkan_context.update_image_from_dmabuf(&frame).unwrap();
+        } 
 
-                    unsafe {
-                        let ret = av_hwframe_get_buffer(
-                            (*encoder.as_ptr()).hw_frames_ctx,
-                            cuda_frame.as_mut_ptr(),
-                            0,
-                        );
-                        if ret < 0 {
-                            return Err(WaycapError::Encoding(format!(
-                                "Failed to allocate CUDA frame buffer: {ret}",
-                            )));
-                        }
-
-                        let result =
-                            cuGraphicsMapResources(1, &mut self.graphics_resource, null_mut());
-                        if result != CUresult::CUDA_SUCCESS {
-                            gl::BindTexture(gl::TEXTURE_2D, 0);
-                            return Err(WaycapError::Encoding(format!(
-                                "Error mapping GL image to CUDA: {result:?}",
-                            )));
-                        }
-
-                        let mut cuda_array: CUarray = null_mut();
-
-                        let result = cuGraphicsSubResourceGetMappedArray(
-                            &mut cuda_array,
-                            self.graphics_resource,
-                            0,
-                            0,
-                        );
-                        if result != CUresult::CUDA_SUCCESS {
-                            cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
-                            gl::BindTexture(gl::TEXTURE_2D, 0);
-                            return Err(WaycapError::Encoding(format!(
-                                "Error getting CUDA Array: {result:?}",
-                            )));
-                        }
-
-                        let copy_params = CUDA_MEMCPY2D_v2 {
-                            srcMemoryType: CUmemorytype::CU_MEMORYTYPE_ARRAY,
-                            srcArray: cuda_array,
-                            srcXInBytes: 0,
-                            srcY: 0,
-                            srcHost: std::ptr::null(),
-                            srcDevice: 0,
-                            srcPitch: 0,
-
-                            dstMemoryType: CUmemorytype::CU_MEMORYTYPE_DEVICE,
-                            dstDevice: (*cuda_frame.as_ptr()).data[0] as CUdeviceptr,
-                            dstPitch: (*cuda_frame.as_ptr()).linesize[0] as usize,
-                            dstXInBytes: 0,
-                            dstY: 0,
-                            dstHost: std::ptr::null_mut(),
-                            dstArray: std::ptr::null_mut(),
-
-                            // RGBA is 4 bytes per pixel
-                            WidthInBytes: (encoder.width() * 4) as usize,
-                            Height: encoder.height() as usize,
-                        };
-
-                        let result = cuMemcpy2D_v2(&copy_params);
-                        if result != CUresult::CUDA_SUCCESS {
-                            cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
-                            gl::BindTexture(gl::TEXTURE_2D, 0);
-                            return Err(WaycapError::Encoding(format!(
-                                "Error mapping cuda frame: {result:?}",
-                            )));
-                        }
-
-                        // Cleanup
-                        let result =
-                            cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
-                        if result != CUresult::CUDA_SUCCESS {
-                            return Err(WaycapError::Encoding(format!(
-                                "Could not unmap resource: {result:?}",
-                            )));
-                        }
-
-                        gl::BindTexture(gl::TEXTURE_2D, 0);
-                    }
-
-                    cuda_frame.set_pts(Some(frame.timestamp));
-                    encoder.send_frame(&cuda_frame)?;
-
-                    let mut packet = ffmpeg::codec::packet::Packet::empty();
-                    if encoder.receive_packet(&mut packet).is_ok() {
-                        if let Some(data) = packet.data() {
-                            match self.encoded_frame_sender.try_send(EncodedVideoFrame {
-                                data: data.to_vec(),
-                                is_keyframe: packet.is_key(),
-                                pts: packet.pts().unwrap_or(0),
-                                dts: packet.dts().unwrap_or(0),
-                            }) {
-                                Ok(_) => {}
-                                Err(crossbeam::channel::TrySendError::Full(_)) => {
-                                    log::error!(
-                                        "Could not send encoded video frame. Receiver is full"
-                                    );
-                                }
-                                Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
-                                    log::error!(
-                                        "Could not send encoded video frame. Receiver disconnected"
-                                    );
-                                }
-                            }
-                        };
-                    }
-                }
-                self.egl_context.as_ref().unwrap().destroy_image(img)?;
-            }
-            Err(e) => log::error!("Could not process dma buf frame: {e:?}"),
-        }
+        // match egl_img_from_dmabuf(self.egl_context.as_ref().unwrap(), &frame) {
+        //     Ok(img) => {
+        //         if let Some(ref mut encoder) = self.encoder {
+        //             let mut cuda_frame = ffmpeg::util::frame::Video::new(
+        //                 ffmpeg_next::format::Pixel::CUDA,
+        //                 encoder.width(),
+        //                 encoder.height(),
+        //             );
+        //
+        //             unsafe {
+        //                 let ret = av_hwframe_get_buffer(
+        //                     (*encoder.as_ptr()).hw_frames_ctx,
+        //                     cuda_frame.as_mut_ptr(),
+        //                     0,
+        //                 );
+        //                 if ret < 0 {
+        //                     return Err(WaycapError::Encoding(format!(
+        //                         "Failed to allocate CUDA frame buffer: {ret}",
+        //                     )));
+        //                 }
+        //
+        //                 let result =
+        //                     cuGraphicsMapResources(1, &mut self.graphics_resource, null_mut());
+        //                 if result != CUresult::CUDA_SUCCESS {
+        //                     gl::BindTexture(gl::TEXTURE_2D, 0);
+        //                     return Err(WaycapError::Encoding(format!(
+        //                         "Error mapping GL image to CUDA: {result:?}",
+        //                     )));
+        //                 }
+        //
+        //                 let mut cuda_array: CUarray = null_mut();
+        //
+        //                 let result = cuGraphicsSubResourceGetMappedArray(
+        //                     &mut cuda_array,
+        //                     self.graphics_resource,
+        //                     0,
+        //                     0,
+        //                 );
+        //                 if result != CUresult::CUDA_SUCCESS {
+        //                     cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
+        //                     gl::BindTexture(gl::TEXTURE_2D, 0);
+        //                     return Err(WaycapError::Encoding(format!(
+        //                         "Error getting CUDA Array: {result:?}",
+        //                     )));
+        //                 }
+        //
+        //                 let copy_params = CUDA_MEMCPY2D_v2 {
+        //                     srcMemoryType: CUmemorytype::CU_MEMORYTYPE_ARRAY,
+        //                     srcArray: cuda_array,
+        //                     srcXInBytes: 0,
+        //                     srcY: 0,
+        //                     srcHost: std::ptr::null(),
+        //                     srcDevice: 0,
+        //                     srcPitch: 0,
+        //
+        //                     dstMemoryType: CUmemorytype::CU_MEMORYTYPE_DEVICE,
+        //                     dstDevice: (*cuda_frame.as_ptr()).data[0] as CUdeviceptr,
+        //                     dstPitch: (*cuda_frame.as_ptr()).linesize[0] as usize,
+        //                     dstXInBytes: 0,
+        //                     dstY: 0,
+        //                     dstHost: std::ptr::null_mut(),
+        //                     dstArray: std::ptr::null_mut(),
+        //
+        //                     // RGBA is 4 bytes per pixel
+        //                     WidthInBytes: (encoder.width() * 4) as usize,
+        //                     Height: encoder.height() as usize,
+        //                 };
+        //
+        //                 let result = cuMemcpy2D_v2(&copy_params);
+        //                 if result != CUresult::CUDA_SUCCESS {
+        //                     cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
+        //                     gl::BindTexture(gl::TEXTURE_2D, 0);
+        //                     return Err(WaycapError::Encoding(format!(
+        //                         "Error mapping cuda frame: {result:?}",
+        //                     )));
+        //                 }
+        //
+        //                 // Cleanup
+        //                 let result =
+        //                     cuGraphicsUnmapResources(1, &mut self.graphics_resource, null_mut());
+        //                 if result != CUresult::CUDA_SUCCESS {
+        //                     return Err(WaycapError::Encoding(format!(
+        //                         "Could not unmap resource: {result:?}",
+        //                     )));
+        //                 }
+        //
+        //                 gl::BindTexture(gl::TEXTURE_2D, 0);
+        //             }
+        //
+        //             cuda_frame.set_pts(Some(frame.timestamp));
+        //             encoder.send_frame(&cuda_frame)?;
+        //
+        //             let mut packet = ffmpeg::codec::packet::Packet::empty();
+        //             if encoder.receive_packet(&mut packet).is_ok() {
+        //                 if let Some(data) = packet.data() {
+        //                     match self.encoded_frame_sender.try_send(EncodedVideoFrame {
+        //                         data: data.to_vec(),
+        //                         is_keyframe: packet.is_key(),
+        //                         pts: packet.pts().unwrap_or(0),
+        //                         dts: packet.dts().unwrap_or(0),
+        //                     }) {
+        //                         Ok(_) => {}
+        //                         Err(crossbeam::channel::TrySendError::Full(_)) => {
+        //                             log::error!(
+        //                                 "Could not send encoded video frame. Receiver is full"
+        //                             );
+        //                         }
+        //                         Err(crossbeam::channel::TrySendError::Disconnected(_)) => {
+        //                             log::error!(
+        //                                 "Could not send encoded video frame. Receiver disconnected"
+        //                             );
+        //                         }
+        //                     }
+        //                 };
+        //             }
+        //         }
+        //         self.egl_context.as_ref().unwrap().destroy_image(img)?;
+        //     }
+        //     Err(e) => log::error!("Could not process dma buf frame: {e:?}"),
+        // }
         Ok(())
     }
 }
@@ -354,6 +361,8 @@ impl NvencEncoder {
         let cuda_ctx = cust::quick_init().unwrap();
 
         let encoder = Self::create_encoder(width, height, encoder_name, &quality, &cuda_ctx)?;
+        let mut vulkan_context = VulkanContext::new().unwrap();
+        vulkan_context.initalize_image(width, height).unwrap();
 
         Ok(Self {
             encoder: Some(encoder),
@@ -367,6 +376,7 @@ impl NvencEncoder {
             graphics_resource: null_mut(),
             egl_context: None,
             egl_texture: 0,
+            vulkan_context: Box::new(vulkan_context),
         })
     }
 

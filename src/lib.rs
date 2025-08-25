@@ -83,6 +83,7 @@ pub mod pipeline;
 pub mod types;
 mod utils;
 mod waycap_egl;
+mod waycap_vulkan;
 
 pub use crate::encoders::dma_buf_encoder::DmaBufEncoder;
 pub use crate::encoders::dynamic_encoder::DynamicEncoder;
@@ -92,7 +93,7 @@ pub use crate::encoders::vaapi_encoder::VaapiEncoder;
 pub use encoders::video::VideoEncoder;
 pub use utils::TIME_UNIT_NS;
 
-use crate::encoders::video::{PipewireSPA, StartVideoEncoder};
+use crate::{encoders::video::{PipewireSPA, StartVideoEncoder}, waycap_vulkan::VulkanContext};
 
 /// Target Screen Resolution
 pub struct Resolution {

@@ -13,7 +13,7 @@ type PFNGLEGLIMAGETARGETTEXTURE2DOESPROC =
 unsafe impl Sync for EglContext {}
 unsafe impl Send for EglContext {}
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum GpuVendor {
     NVIDIA,
