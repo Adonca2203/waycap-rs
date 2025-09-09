@@ -242,6 +242,7 @@ impl<V: VideoEncoder + PipewireSPA + StartVideoEncoder> Capture<V> {
         log::info!("Capture started successfully.");
         Ok(_self)
     }
+
     fn start_pipewire_video(
         &mut self,
         include_cursor: bool,
@@ -268,6 +269,7 @@ impl<V: VideoEncoder + PipewireSPA + StartVideoEncoder> Capture<V> {
         let stream = active_cast.streams().next().unwrap();
         let stream_node = stream.pipewire_node();
         let controls = Arc::clone(&self.controls);
+
         self.worker_handles
             .push(std::thread::spawn(move || -> Result<()> {
                 let mut video_cap = match VideoCapture::new(
@@ -440,7 +442,6 @@ impl Capture<DynamicEncoder> {
         )?)));
 
         if include_audio {
-            println!("including audio");
             let audio_rx =
                 _self.start_pipewire_audio(audio_encoder_type, Arc::clone(&ready_state))?;
             // Wait until both either threads are ready
