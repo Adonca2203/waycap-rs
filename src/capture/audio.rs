@@ -4,8 +4,8 @@ use crate::{types::audio_frame::RawAudioFrame, CaptureControls, ReadyState};
 use crossbeam::channel::Sender;
 use pipewire::{
     self as pw,
-    context::Context,
-    main_loop::MainLoop,
+    context::ContextRc,
+    main_loop::MainLoopRc,
     properties::properties,
     spa::{
         self,
@@ -13,7 +13,7 @@ use pipewire::{
         pod::Pod,
         utils::Direction,
     },
-    stream::{StreamFlags, StreamState},
+    stream::{StreamFlags, StreamRc, StreamState},
     sys::pw_stream_get_nsec,
 };
 
@@ -28,7 +28,6 @@ pub struct AudioCapture {
     ready_state: Arc<ReadyState>,
 }
 
-// TODO: Similar approach to video capture in how the struct should look
 impl AudioCapture {
     pub fn new(ready_state: Arc<ReadyState>) -> Self {
         Self { ready_state }
@@ -40,7 +39,7 @@ impl AudioCapture {
         termination_recv: pw::channel::Receiver<Terminate>,
         controls: Arc<CaptureControls>,
     ) -> Result<(), pw::Error> {
-        let pw_loop = MainLoop::new(None)?;
+        let pw_loop = MainLoopRc::new(None)?;
         let terminate_loop = pw_loop.clone();
 
         let _recv = termination_recv.attach(pw_loop.loop_(), move |_| {
@@ -48,8 +47,8 @@ impl AudioCapture {
             terminate_loop.quit();
         });
 
-        let pw_context = Context::new(&pw_loop)?;
-        let audio_core = pw_context.connect(None)?;
+        let pw_context = ContextRc::new(&pw_loop, None)?;
+        let audio_core = pw_context.connect_rc(None)?;
 
         let _audio_core_listener = audio_core
             .add_listener_local()
@@ -61,14 +60,14 @@ impl AudioCapture {
         let data = UserData::default();
 
         // Audio Stream
-        let audio_stream = pw::stream::Stream::new(
-            &audio_core,
+        let audio_stream = StreamRc::new(
+            audio_core,
             "waycap-audio",
             properties! {
-            *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE => "Music",
-            *pw::keys::NODE_LATENCY => "1024/48000",
+                *pw::keys::MEDIA_TYPE => "Audio",
+                *pw::keys::MEDIA_CATEGORY => "Capture",
+                *pw::keys::MEDIA_ROLE => "Music",
+                *pw::keys::NODE_LATENCY => "1024/48000",
             },
         )?;
 
@@ -145,8 +144,6 @@ impl AudioCapture {
                                 );
                             }
                             Err(crossbeam::channel::TrySendError::Disconnected(frame)) => {
-                                // TODO: If we disconnected, terminate the session instead of
-                                // throwing an error it means the receiver was dropped.
                                 log::error!(
                                     "channel is disconnected when trying to send frame at: {}.",
                                     frame.timestamp
@@ -165,7 +162,7 @@ impl AudioCapture {
                 pw::spa::param::format::FormatProperties::MediaType,
                 Id,
                 pw::spa::param::format::MediaType::Audio
-                ),
+            ),
             pw::spa::pod::property!(
                 pw::spa::param::format::FormatProperties::MediaSubtype,
                 Id,

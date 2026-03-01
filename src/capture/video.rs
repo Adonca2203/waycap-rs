@@ -1,25 +1,26 @@
 use std::{
     os::fd::{FromRawFd, OwnedFd, RawFd},
-    sync::{
-        mpsc::{self},
-        Arc,
-    },
+    sync::{mpsc, Arc},
 };
 
 use crossbeam::channel::Sender;
+use pipewire::stream::StreamRc;
 use pipewire::{
     self as pw,
-    context::Context,
-    core::{Core, Listener},
-    main_loop::MainLoop,
+    context::ContextRc,
+    core::CoreRc,
+    main_loop::MainLoopRc,
     spa::{
-        buffer::{Data, DataType, MetaHeader},
+        buffer::{
+            meta::{MetaHeader, VideoDamage},
+            Data, DataType,
+        },
         param::ParamType,
         pod::Property,
-        sys::{SPA_META_Header, SPA_PARAM_META_size, SPA_PARAM_META_type},
+        sys::{SPA_META_Header, SPA_META_VideoDamage, SPA_PARAM_META_size, SPA_PARAM_META_type},
         utils::{Direction, SpaTypes},
     },
-    stream::{Stream, StreamFlags, StreamListener, StreamState},
+    stream::{StreamFlags, StreamListener, StreamState},
 };
 use pw::{properties::properties, spa};
 
@@ -42,11 +43,11 @@ pub struct VideoCapture {
 
 // Need to keep all of these alive even if never referenced
 struct PipewireState {
-    pw_loop: MainLoop,
-    _pw_context: Context,
-    _core: Core,
-    _core_listener: Listener,
-    _stream: Stream,
+    pw_loop: MainLoopRc,
+    _pw_context: ContextRc,
+    _core: CoreRc,
+    _core_listener: pw::core::Listener,
+    _stream: StreamRc,
     _stream_listener: StreamListener<UserData>,
 }
 
@@ -67,11 +68,14 @@ impl VideoCapture {
         termination_recv: pw::channel::Receiver<Terminate>,
         pw_obj: spa::pod::Object,
     ) -> Result<Self> {
-        let pw_loop = MainLoop::new(None)?;
-        let context = Context::new(&pw_loop)?;
-        let mut core = context.connect_fd(unsafe { OwnedFd::from_raw_fd(pipewire_fd) }, None)?;
-        let core_listener = Self::setup_core_listener(&mut core)?;
-        let mut stream = Self::create_stream(&core)?;
+        let pw_loop = MainLoopRc::new(None)?;
+        let context = ContextRc::new(&pw_loop, None)?;
+        let core = context.connect_fd_rc(unsafe { OwnedFd::from_raw_fd(pipewire_fd) }, None)?;
+
+        let mut core_mut = core.clone();
+        let core_listener = Self::setup_core_listener(&mut core_mut)?;
+
+        let mut stream = Self::create_stream(core.clone())?;
         let stream_listener = Self::setup_stream_listener(
             &mut stream,
             UserData::default(),
@@ -95,8 +99,8 @@ impl VideoCapture {
         })
     }
 
-    fn create_stream(core: &Core) -> Result<Stream> {
-        match Stream::new(
+    fn create_stream(core: CoreRc) -> Result<StreamRc> {
+        match StreamRc::new(
             core,
             "waycap-video",
             properties! {
@@ -110,7 +114,7 @@ impl VideoCapture {
         }
     }
 
-    fn setup_core_listener(core: &mut Core) -> Result<Listener> {
+    fn setup_core_listener(core: &mut CoreRc) -> Result<pw::core::Listener> {
         Ok(core
             .add_listener_local()
             .info(|i| log::debug!("VIDEO CORE:\n{i:#?}"))
@@ -121,7 +125,7 @@ impl VideoCapture {
 
     #[allow(clippy::too_many_arguments)]
     fn setup_stream_listener(
-        stream: &mut Stream,
+        stream: &mut StreamRc,
         data: UserData,
         ready_state: Arc<ReadyState>,
         controls: &Arc<CaptureControls>,
@@ -175,7 +179,7 @@ impl VideoCapture {
                 let (width, height) = (
                     user_data.video_format.size().width,
                     user_data.video_format.size().height,
-                    );
+                );
                 match resolution_sender.send(Resolution { width, height }) {
                     Ok(_) => {}
                     Err(e) => {
@@ -209,6 +213,21 @@ impl VideoCapture {
                             0
                         };
 
+                        // Test the VideoDamage iterator!
+                        if let Some(damage) = buffer.find_meta::<VideoDamage>() {
+                            log::debug!("Got VideoDamage metadata!");
+                            for (i, region) in damage.iter().enumerate() {
+                                log::debug!(
+                                    "Damage region {}: pos=({}, {}), size={}x{}",
+                                    i,
+                                    region.position().x,
+                                    region.position().y,
+                                    region.size().width,
+                                    region.size().height
+                                );
+                            }
+                        }
+
                         let datas = buffer.datas_mut();
                         if datas.is_empty() {
                             return;
@@ -237,8 +256,6 @@ impl VideoCapture {
                                 );
                             }
                             Err(crossbeam::channel::TrySendError::Disconnected(frame)) => {
-                                // TODO: If we disconnected, terminate the session instead of
-                                // throwing an error it means the receiver was dropped.
                                 log::error!(
                                     "Could not send video frame at: {}. Connection closed.",
                                     frame.timestamp
@@ -254,7 +271,7 @@ impl VideoCapture {
     }
 
     fn connect_stream(
-        stream: &mut Stream,
+        stream: &mut StreamRc,
         stream_node: u32,
         pw_obj: spa::pod::Object,
     ) -> Result<()> {
@@ -287,9 +304,30 @@ impl VideoCapture {
         .0
         .into_inner();
 
+        let metas_damage_obj = pw::spa::pod::object!(
+            SpaTypes::ObjectParamMeta,
+            ParamType::Meta,
+            Property::new(
+                SPA_PARAM_META_type,
+                pw::spa::pod::Value::Id(pw::spa::utils::Id(SPA_META_VideoDamage))
+            ),
+            Property::new(
+                SPA_PARAM_META_size,
+                pw::spa::pod::Value::Int(size_of::<pw::spa::sys::spa_meta_region>() as i32)
+            ),
+        );
+        let metas_damage_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &pw::spa::pod::Value::Object(metas_damage_obj),
+        )
+        .unwrap()
+        .0
+        .into_inner();
+
         let mut video_params = [
             Pod::from_bytes(&video_spa_values).unwrap(),
             Pod::from_bytes(&metas_values).unwrap(),
+            Pod::from_bytes(&metas_damage_values).unwrap(),
         ];
 
         stream.connect(
