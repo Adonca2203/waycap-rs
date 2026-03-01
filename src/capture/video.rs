@@ -11,13 +11,10 @@ use pipewire::{
     core::CoreRc,
     main_loop::MainLoopRc,
     spa::{
-        buffer::{
-            meta::{MetaHeader, VideoDamage},
-            Data, DataType,
-        },
+        buffer::{meta::MetaHeader, Data, DataType},
         param::ParamType,
         pod::Property,
-        sys::{SPA_META_Header, SPA_META_VideoDamage, SPA_PARAM_META_size, SPA_PARAM_META_type},
+        sys::{SPA_META_Header, SPA_PARAM_META_size, SPA_PARAM_META_type},
         utils::{Direction, SpaTypes},
     },
     stream::{StreamFlags, StreamListener, StreamState},
@@ -213,21 +210,6 @@ impl VideoCapture {
                             0
                         };
 
-                        // Test the VideoDamage iterator!
-                        if let Some(damage) = buffer.find_meta::<VideoDamage>() {
-                            log::debug!("Got VideoDamage metadata!");
-                            for (i, region) in damage.iter().enumerate() {
-                                log::debug!(
-                                    "Damage region {}: pos=({}, {}), size={}x{}",
-                                    i,
-                                    region.position().x,
-                                    region.position().y,
-                                    region.size().width,
-                                    region.size().height
-                                );
-                            }
-                        }
-
                         let datas = buffer.datas_mut();
                         if datas.is_empty() {
                             return;
@@ -304,30 +286,9 @@ impl VideoCapture {
         .0
         .into_inner();
 
-        let metas_damage_obj = pw::spa::pod::object!(
-            SpaTypes::ObjectParamMeta,
-            ParamType::Meta,
-            Property::new(
-                SPA_PARAM_META_type,
-                pw::spa::pod::Value::Id(pw::spa::utils::Id(SPA_META_VideoDamage))
-            ),
-            Property::new(
-                SPA_PARAM_META_size,
-                pw::spa::pod::Value::Int(size_of::<pw::spa::sys::spa_meta_region>() as i32)
-            ),
-        );
-        let metas_damage_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
-            std::io::Cursor::new(Vec::new()),
-            &pw::spa::pod::Value::Object(metas_damage_obj),
-        )
-        .unwrap()
-        .0
-        .into_inner();
-
         let mut video_params = [
             Pod::from_bytes(&video_spa_values).unwrap(),
             Pod::from_bytes(&metas_values).unwrap(),
-            Pod::from_bytes(&metas_damage_values).unwrap(),
         ];
 
         stream.connect(

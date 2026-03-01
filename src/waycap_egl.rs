@@ -288,7 +288,7 @@ impl EglContext {
             }
 
             log::trace!(
-                "✓ Created persistent texture: ID {texture_id} ({}x{})",
+                "Created persistent texture: ID {texture_id} ({}x{})",
                 self.width,
                 self.height
             );
