@@ -6,8 +6,8 @@ use std::io;
 pub enum WaycapError {
     /// Errors from FFmpeg
     FFmpeg(ffmpeg_next::Error),
-    /// Egl Errors,
-    Egl(khronos_egl::Error),
+    /// Vulkan Errors
+    Vulkan(String),
     /// Errors from PipeWire
     PipeWire(String),
     /// Errors from XDG Portal
@@ -44,7 +44,7 @@ impl fmt::Display for WaycapError {
             WaycapError::Device(msg) => write!(f, "Device error: {msg}"),
             WaycapError::Validation(msg) => write!(f, "Validation error: {msg}"),
             WaycapError::Other(msg) => write!(f, "Error: {msg}"),
-            WaycapError::Egl(msg) => write!(f, "Egl Error: {msg}"),
+            WaycapError::Vulkan(msg) => write!(f, "Vulkan error: {msg}"),
         }
     }
 }
@@ -95,9 +95,9 @@ impl From<&str> for WaycapError {
     }
 }
 
-impl From<khronos_egl::Error> for WaycapError {
-    fn from(err: khronos_egl::Error) -> Self {
-        WaycapError::Egl(err)
+impl From<ash::vk::Result> for WaycapError {
+    fn from(err: ash::vk::Result) -> Self {
+        WaycapError::Vulkan(err.to_string())
     }
 }
 

@@ -12,7 +12,7 @@ use crate::{
         error::{Result, WaycapError},
         video_frame::{EncodedVideoFrame, RawVideoFrame},
     },
-    waycap_egl::{EglContext, GpuVendor},
+    waycap_vulkan::{detect_gpu_vendor, GpuVendor},
     VideoEncoder,
 };
 
@@ -31,9 +31,8 @@ impl DynamicEncoder {
         let encoder_type = match encoder_type {
             Some(typ) => typ,
             None => {
-                // Dummy dimensions we just use this go get GPU vendor then drop it
-                let dummy_context = EglContext::new(100, 100)?;
-                match dummy_context.get_gpu_vendor() {
+                let vendor = detect_gpu_vendor()?;
+                match vendor {
                     GpuVendor::NVIDIA => VideoEncoderType::H264Nvenc,
                     GpuVendor::AMD | GpuVendor::INTEL => VideoEncoderType::H264Vaapi,
                     GpuVendor::UNKNOWN => {
@@ -118,8 +117,8 @@ impl ProcessingThread for DynamicEncoder {
 
 impl PipewireSPA for DynamicEncoder {
     fn get_spa_definition() -> Result<pipewire::spa::pod::Object> {
-        let dummy_context = EglContext::new(100, 100)?;
-        match dummy_context.get_gpu_vendor() {
+        let vendor = detect_gpu_vendor()?;
+        match vendor {
             GpuVendor::NVIDIA => NvencEncoder::get_spa_definition(),
             GpuVendor::AMD | GpuVendor::INTEL => VaapiEncoder::get_spa_definition(),
             GpuVendor::UNKNOWN => Err(WaycapError::Init(

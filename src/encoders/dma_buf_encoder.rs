@@ -1,7 +1,7 @@
 use crate::{
     encoders::video::{PipewireSPA, StartVideoEncoder},
     types::{error::WaycapError, video_frame::RawVideoFrame},
-    waycap_egl::{EglContext, GpuVendor},
+    waycap_vulkan::{detect_gpu_vendor, GpuVendor},
     NvencEncoder, VaapiEncoder, VideoEncoder,
 };
 use crossbeam::channel::Receiver;
@@ -56,8 +56,8 @@ impl VideoEncoder for DmaBufEncoder {
 
 impl PipewireSPA for DmaBufEncoder {
     fn get_spa_definition() -> Result<pipewire::spa::pod::Object> {
-        let dummy_context = EglContext::new(100, 100)?;
-        match dummy_context.get_gpu_vendor() {
+        let vendor = detect_gpu_vendor()?;
+        match vendor {
             GpuVendor::NVIDIA => NvencEncoder::get_spa_definition(),
             GpuVendor::AMD | GpuVendor::INTEL => VaapiEncoder::get_spa_definition(),
             GpuVendor::UNKNOWN => Err(WaycapError::Init(

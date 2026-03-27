@@ -82,7 +82,7 @@ mod encoders;
 pub mod pipeline;
 pub mod types;
 mod utils;
-mod waycap_egl;
+mod waycap_vulkan;
 
 pub use crate::encoders::dma_buf_encoder::DmaBufEncoder;
 pub use crate::encoders::dynamic_encoder::DynamicEncoder;
