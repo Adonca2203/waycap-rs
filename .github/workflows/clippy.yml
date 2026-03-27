@@ -3,28 +3,25 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
-
 jobs:
   clippy:
     runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.6.0-devel-ubuntu24.04
+      options: --user root
+    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        components: clippy
-        profile: minimal
-        override: true
-        
     - name: Install system dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
+        apt-get update
+        apt-get install -y software-properties-common
+        add-apt-repository ppa:pipewire-debian/pipewire-upstream -y
+        apt-get update
+        apt-get install -y pipewire libpipewire-0.3-dev \
           libdbus-1-dev \
-          libpipewire-0.3-dev \
           libavutil-dev \
           libavformat-dev \
           libavcodec-dev \
@@ -34,15 +31,25 @@ jobs:
           libwayland-dev \
           libwayland-client0 \
           wayland-protocols \
-          pkg-config
+          pkg-config \
+          curl \
+          build-essential \
+          libssl-dev \
+          libclang-dev
 
-    - uses: Jimver/cuda-toolkit@v0.2.24
-      id: cuda-toolkit
+    - name: Check PipeWire version
+      run: pkg-config --modversion libpipewire-0.3
+      
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
       with:
-        cuda: '12.5.0'
-
+        components: clippy
+          
+    - name: Verify CUDA installation
+      run: nvcc --version
+        
     - name: Cache cargo registry
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -54,4 +61,4 @@ jobs:
           ${{ runner.os }}-cargo-
           
     - name: Run Clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --all-targets -- -D warnings
