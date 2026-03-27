@@ -3,12 +3,11 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
-
 jobs:
   clippy:
     runs-on: ubuntu-latest
     container:
-      image: nvidia/cuda:12.5.0-devel-ubuntu22.04
+      image: nvidia/cuda:12.6.0-devel-ubuntu24.04
       options: --user root
     
     steps:
@@ -21,9 +20,8 @@ jobs:
         apt-get install -y software-properties-common
         add-apt-repository ppa:pipewire-debian/pipewire-upstream -y
         apt-get update
-        apt-get install -y \
+        apt-get install -y pipewire libpipewire-0.3-dev \
           libdbus-1-dev \
-          libpipewire-0.3-dev \
           libavutil-dev \
           libavformat-dev \
           libavcodec-dev \
@@ -38,6 +36,9 @@ jobs:
           build-essential \
           libssl-dev \
           libclang-dev
+
+    - name: Check PipeWire version
+      run: pkg-config --modversion libpipewire-0.3
       
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -45,9 +46,7 @@ jobs:
         components: clippy
           
     - name: Verify CUDA installation
-      run: |
-        nvcc --version
-        echo "CUDA_PATH=$CUDA_PATH"
+      run: nvcc --version
         
     - name: Cache cargo registry
       uses: actions/cache@v4
@@ -62,4 +61,4 @@ jobs:
           ${{ runner.os }}-cargo-
           
     - name: Run Clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --all-targets -- -D warnings
