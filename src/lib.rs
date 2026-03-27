@@ -299,7 +299,7 @@ impl<V: VideoEncoder + PipewireSPA + StartVideoEncoder> Capture<V> {
         let timeout = Duration::from_secs(5);
         let start = Instant::now();
         let resolution = loop {
-            if let Ok(reso) = reso_recv.recv() {
+            if let Ok(reso) = reso_recv.try_recv() {
                 break reso;
             }
 
