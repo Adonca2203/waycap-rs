@@ -31,8 +31,9 @@ crossbeam = "0.8.4"
 
 ## Example Usage
 ```rust
-use waycap_rs::{CaptureBuilder, QualityPreset, VideoEncoder, AudioEncoder};
 use std::{thread, time::Duration};
+use waycap_rs::pipeline::builder::CaptureBuilder;
+use waycap_rs::types::config::{AudioEncoder, QualityPreset, VideoEncoder};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a capture session
