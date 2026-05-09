@@ -5,6 +5,7 @@ use crossbeam::channel::Sender;
 use pipewire::{
     self as pw,
     context::ContextRc,
+    core::CoreRc,
     main_loop::MainLoopRc,
     properties::properties,
     spa::{
@@ -13,7 +14,7 @@ use pipewire::{
         pod::Pod,
         utils::Direction,
     },
-    stream::{StreamFlags, StreamRc, StreamState},
+    stream::{StreamFlags, StreamListener, StreamRc, StreamState},
     sys::pw_stream_get_nsec,
 };
 
@@ -24,44 +25,55 @@ struct UserData {
     audio_format: spa::param::audio::AudioInfoRaw,
 }
 
+struct PipewireState {
+    pw_loop: MainLoopRc,
+    _pw_context: ContextRc,
+    _core: CoreRc,
+    _core_listener: pw::core::Listener,
+    _stream: StreamRc,
+    _stream_listener: StreamListener<UserData>,
+}
+
 pub struct AudioCapture {
-    ready_state: Arc<ReadyState>,
+    termination_recv: Option<pw::channel::Receiver<Terminate>>,
+    pipewire_state: PipewireState,
 }
 
 impl AudioCapture {
-    pub fn new(ready_state: Arc<ReadyState>) -> Self {
-        Self { ready_state }
-    }
-
-    pub fn run(
-        &self,
+    pub fn new(
+        ready_state: Arc<ReadyState>,
         audio_sender: Sender<RawAudioFrame>,
         termination_recv: pw::channel::Receiver<Terminate>,
         controls: Arc<CaptureControls>,
-    ) -> Result<(), pw::Error> {
+    ) -> Result<Self, pw::Error> {
         let pw_loop = MainLoopRc::new(None)?;
-        let terminate_loop = pw_loop.clone();
-
-        let _recv = termination_recv.attach(pw_loop.loop_(), move |_| {
-            log::debug!("Terminating audio capture loop");
-            terminate_loop.quit();
-        });
-
         let pw_context = ContextRc::new(&pw_loop, None)?;
-        let audio_core = pw_context.connect_rc(None)?;
+        let core = pw_context.connect_rc(None)?;
 
-        let _audio_core_listener = audio_core
-            .add_listener_local()
-            .info(|i| log::debug!("AUDIO CORE:\n{i:#?}"))
-            .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
-            .done(|d, _| log::debug!("DONE: {d}"))
-            .register();
+        let mut core_mut = core.clone();
+        let core_listener = Self::setup_core_listener(&mut core_mut);
 
-        let data = UserData::default();
+        let mut stream = Self::create_stream(core.clone())?;
+        let stream_listener =
+            Self::setup_stream_listener(&mut stream, ready_state, controls, audio_sender)?;
+        Self::connect_stream(&mut stream)?;
 
-        // Audio Stream
-        let audio_stream = StreamRc::new(
-            audio_core,
+        Ok(Self {
+            termination_recv: Some(termination_recv),
+            pipewire_state: PipewireState {
+                pw_loop,
+                _pw_context: pw_context,
+                _core: core,
+                _core_listener: core_listener,
+                _stream: stream,
+                _stream_listener: stream_listener,
+            },
+        })
+    }
+
+    fn create_stream(core: CoreRc) -> Result<StreamRc, pw::Error> {
+        StreamRc::new(
+            core,
             "waycap-audio",
             properties! {
                 *pw::keys::MEDIA_TYPE => "Audio",
@@ -69,15 +81,30 @@ impl AudioCapture {
                 *pw::keys::MEDIA_ROLE => "Music",
                 *pw::keys::NODE_LATENCY => "1024/48000",
             },
-        )?;
+        )
+    }
 
-        let ready_state_a = Arc::clone(&self.ready_state);
-        let ready_state_b = Arc::clone(&self.ready_state);
-        let _audio_stream_shared_data_listener = audio_stream
-            .add_local_listener_with_user_data(data)
+    fn setup_core_listener(core: &mut CoreRc) -> pw::core::Listener {
+        core.add_listener_local()
+            .info(|i| log::debug!("AUDIO CORE:\n{i:#?}"))
+            .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
+            .done(|d, _| log::debug!("DONE: {d}"))
+            .register()
+    }
+
+    fn setup_stream_listener(
+        stream: &mut StreamRc,
+        ready_state: Arc<ReadyState>,
+        controls: Arc<CaptureControls>,
+        audio_sender: Sender<RawAudioFrame>,
+    ) -> Result<StreamListener<UserData>, pw::Error> {
+        let ready_state_clone = Arc::clone(&ready_state);
+
+        let stream_listener = stream
+            .add_local_listener_with_user_data(UserData::default())
             .state_changed(move |_, _, old, new| {
                 log::info!("Audio Stream State Changed: {old:?} -> {new:?}");
-                ready_state_a.audio.store(
+                ready_state.audio.store(
                     new == StreamState::Streaming,
                     std::sync::atomic::Ordering::Release,
                 );
@@ -96,7 +123,6 @@ impl AudioCapture {
                         Err(_) => return,
                     };
 
-                // only accept raw audio
                 if media_type != MediaType::Audio || media_subtype != MediaSubtype::Raw {
                     return;
                 }
@@ -116,8 +142,7 @@ impl AudioCapture {
             .process(move |stream, _| match stream.dequeue_buffer() {
                 None => log::debug!("Out of audio buffers"),
                 Some(mut buffer) => {
-                    // Wait until video is streaming before we try to process
-                    if !ready_state_b.video_ready() || controls.skip_processing() {
+                    if !ready_state_clone.video_ready() || controls.skip_processing() {
                         return;
                     }
 
@@ -155,6 +180,10 @@ impl AudioCapture {
             })
             .register()?;
 
+        Ok(stream_listener)
+    }
+
+    fn connect_stream(stream: &mut StreamRc) -> Result<(), pw::Error> {
         let audio_spa_obj = pw::spa::pod::object! {
             pw::spa::utils::SpaTypes::ObjectParamFormat,
             pw::spa::param::ParamType::EnumFormat,
@@ -186,19 +215,26 @@ impl AudioCapture {
         let mut audio_params = [Pod::from_bytes(&audio_spa_values).unwrap()];
 
         let sink_id_to_use = get_default_sink_node_id();
-
         log::debug!("Default sink id: {sink_id_to_use:?}");
-        audio_stream.connect(
+
+        stream.connect(
             Direction::Input,
             sink_id_to_use,
             StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
             &mut audio_params,
-        )?;
+        )
+    }
 
-        log::debug!("Audio Stream: {audio_stream:?}");
+    pub fn run(&mut self) {
+        let terminate_loop = self.pipewire_state.pw_loop.clone();
+        let terminate_recv = self.termination_recv.take().unwrap();
+        let _recv = terminate_recv.attach(self.pipewire_state.pw_loop.loop_(), move |_| {
+            log::debug!("Terminating audio capture loop");
+            terminate_loop.quit();
+        });
 
-        pw_loop.run();
-        Ok(())
+        log::debug!("Audio Stream: {:?}", self.pipewire_state._stream);
+        self.pipewire_state.pw_loop.run();
     }
 }
 
@@ -211,8 +247,6 @@ fn get_default_sink_node_id() -> Option<u32> {
         .expect("Failed to execute command");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-
     let cleaned = stdout.replace('"', "");
-
     cleaned.trim().parse::<u32>().ok()
 }

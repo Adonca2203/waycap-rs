@@ -355,8 +355,8 @@ impl<V: VideoEncoder + PipewireSPA + StartVideoEncoder> Capture<V> {
         let controls = Arc::clone(&self.controls);
         let pw_audio_worker = std::thread::spawn(move || -> Result<()> {
             log::debug!("Starting audio stream");
-            let audio_cap = AudioCapture::new(ready_state);
-            audio_cap.run(audio_tx, pw_audio_recv, controls)?;
+            let mut audio_cap = AudioCapture::new(ready_state, audio_tx, pw_audio_recv, controls)?;
+            audio_cap.run();
             Ok(())
         });
 
