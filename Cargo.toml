@@ -1,6 +1,6 @@
 [package]
 name = "waycap-rs"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 authors = ["Adonis Carvajal <adonis.carvajal2203@gmail.com>"]
 description = "High-level Wayland screen capture library with hardware-accelerated encoding"
@@ -23,7 +23,7 @@ egl = ["dep:khronos-egl", "dep:libloading", "dep:wayland-client", "dep:wayland-s
 [dependencies]
 bytemuck = "1.23.0"
 drm-fourcc = "2.2.0"
-ffmpeg-next = { version = "8.1.x", features = ["codec", "format"] }
+ffmpeg-next = { version = "9.0.0", features = ["codec", "format"] }
 libc = "0.2.172"
 log = "0.4.27"
 pipewire = { version = "0.10.0" }
