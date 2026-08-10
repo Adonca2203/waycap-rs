@@ -33,13 +33,7 @@ impl OpusEncoder {
         encoder_ctx.set_frame_rate(Some(Rational::new(1, 48000)));
         encoder_ctx.set_channel_layout(ffmpeg::channel_layout::ChannelLayout::STEREO);
 
-        let mut encoder = encoder_ctx.open()?;
-
-        // Opus frame size is based on n channels so need to update it
-        unsafe {
-            (*encoder.as_mut_ptr()).frame_size =
-                (encoder.frame_size() as i32 * encoder.channels() as i32) as i32;
-        }
+        let encoder = encoder_ctx.open()?;
 
         Ok(encoder)
     }
@@ -78,6 +72,7 @@ impl AudioEncoder for OpusEncoder {
             }
 
             let frame_size = encoder.frame_size() as usize;
+            let chunk_size = frame_size * n_channels;
 
             // Boost the audio so that even if system audio level is low
             // it's still audible in playback
@@ -85,8 +80,8 @@ impl AudioEncoder for OpusEncoder {
             self.leftover_data.extend(raw_frame.samples);
 
             // Send chunked frames to encoder
-            while self.leftover_data.len() >= frame_size {
-                let frame_samples: Vec<f32> = self.leftover_data.drain(..frame_size).collect();
+            while self.leftover_data.len() >= chunk_size {
+                let frame_samples: Vec<f32> = self.leftover_data.drain(..chunk_size).collect();
                 let mut frame = ffmpeg::frame::Audio::new(
                     encoder.format(),
                     frame_size,
