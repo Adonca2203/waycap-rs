@@ -5,7 +5,8 @@ A high-level Wayland screen capture library with hardware-accelerated encoding f
 ## Features
 
 - **Hardware-accelerated video encoding** (VAAPI for Intel/AMD, NVENC for NVIDIA)
-- **Audio capture** with Opus encoding
+- **Audio capture** with Opus encoding, including system audio, microphone, or both mixed into a single track
+- **Device selection** by name (e.g. for a front-end GUI to let users pick their mic) via `list_audio_devices()`
 - **Copy-Free** video encoding leveraging PipeWire's DMA Buffers
 - **Multiple quality presets** for various use cases
 - **Cursor visibility control**
@@ -26,14 +27,14 @@ Add this to your `Cargo.toml`:
 ```toml
 [dependencies]
 # Default: VAAPI only (Intel/AMD)
-waycap-rs = "3.0.0"
+waycap-rs = "3.1.0"
 crossbeam = "0.8.4"
 
 # NVIDIA only
-waycap-rs = { version = "3.0.0", default-features = false, features = ["nvidia", "vulkan"] }
+waycap-rs = { version = "3.1.0", default-features = false, features = ["nvidia", "vulkan"] }
 
 # Support both, auto-detect GPU at runtime
-waycap-rs = { version = "3.0.0", features = ["nvidia", "vulkan"] }
+waycap-rs = { version = "3.1.0", features = ["nvidia", "vulkan"] }
 ```
 
 ### Cargo Features
@@ -99,6 +100,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Audio Sources
+
+By default `.with_audio()` captures system audio (the default playback device). You can also
+capture a microphone, either alongside system audio (mixed into one track) or by itself, and
+target a specific device by name instead of the system default:
+
+```rust
+use waycap_rs::pipeline::builder::CaptureBuilder;
+use waycap_rs::types::config::AudioSource;
+
+// System audio + default mic, mixed into one track
+let mut capture = CaptureBuilder::new()
+    .with_audio()
+    .with_mic()
+    .build()?;
+
+// Toggle mic mute at any point without restarting the stream
+let controls = capture.controls();
+controls.toggle_mic();
+```
+
+To let users pick a specific device (e.g. in a front-end GUI), enumerate what's available and
+pass the chosen device's name via `AudioSource::Named`:
+
+```rust
+for device in waycap_rs::list_audio_devices()? {
+    println!("{:?}: {} ({})", device.kind, device.description, device.name);
+}
+
+let mut capture = CaptureBuilder::new()
+    .with_mic_source(AudioSource::Named("USB Microphone".into()))
+    .build()?;
+```
+
 ## Primary Use Case: [WayCap](https://github.com/Adonca2203/WayCap)
 This library was created primarily to support the development of WayCap -- a low-latency screen recorder targeting Wayland Linux DEs.
 waycap-rs originally lived within this application but was broken out to split library and application logic, you can read more about
@@ -141,6 +176,9 @@ To run any of the examples, you can do so with
 ```bash
 # Default (VAAPI — Intel/AMD)
 cargo run --example record_and_save
+
+# System audio + mic mixed into one track, with a mute/unmute demo
+cargo run --example record_and_save_with_mic
 
 # NVIDIA only
 cargo run --example record_and_save --features "nvidia,vulkan"

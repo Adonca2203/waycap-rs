@@ -6,6 +6,10 @@ use crate::types::{
 
 pub const TIME_UNIT_NS: u64 = 1_000_000_000;
 
+/// Rate/channels every audio stream negotiates to, so mixing two streams' samples is safe.
+pub(crate) const TARGET_AUDIO_SAMPLE_RATE: u32 = 48_000;
+pub(crate) const TARGET_AUDIO_CHANNELS: u32 = 2;
+
 #[cfg(feature = "nvidia")]
 pub fn extract_dmabuf_planes(raw_frame: &RawVideoFrame) -> Result<Vec<DmaBufPlane>> {
     match raw_frame.dmabuf_fd {

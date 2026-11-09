@@ -95,3 +95,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - XDG portal restore token support — on subsequent launches the screen-recording permission prompt is skipped
   - `CaptureBuilder::with_restore_token(token)` — pass a token saved from a previous session
   - `Capture::restore_token` — read the token returned by the portal after a successful start and persist it for next time
+
+## [3.1.0] - 2026-11-08
+### Added
+- Microphone capture, mixed into the same audio track as system audio
+  - `CaptureBuilder::with_mic()` — capture the default microphone alongside system audio
+  - `CaptureBuilder::with_mic_source(AudioSource)` — capture a specific mic/input device instead of the default
+  - `CaptureBuilder::with_audio_source(AudioSource)` — capture a specific system-audio target instead of the default playback device
+  - `AudioSource` enum (`DefaultOutput`, `DefaultInput`, `Named(String)`) for selecting PipeWire devices by name
+  - `waycap_rs::list_audio_devices()` — enumerate available playback/capture devices (name + description), e.g. to populate a device picker in a front-end GUI
+  - `CaptureControls::toggle_mic()` / `is_mic_muted()` — mute/unmute the mic leg at runtime without tearing down the stream
+### Changed
+- Replaced the `pactl`-based default-sink lookup with a native PipeWire registry + metadata query
+- Every audio capture stream (system audio and mic) now negotiates a consistent 48kHz/stereo format, which is what makes mixing mic + system audio samples safe
+### Fixed
+- The automatic RMS gain boost (intended for quiet system audio) no longer applies to mic audio, where it was amplifying the mic's noise floor into audible static

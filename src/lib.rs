@@ -54,8 +54,9 @@
 
 #![warn(clippy::all)]
 use std::{
+    collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self},
         Arc,
     },
@@ -67,12 +68,18 @@ use crossbeam::{
     channel::{bounded, Receiver, Sender},
     select,
 };
-use encoders::{audio::AudioEncoder, opus_encoder::OpusEncoder};
+use encoders::{
+    audio::{boost_with_rms, AudioEncoder},
+    opus_encoder::OpusEncoder,
+};
 use portal_screencast_waycap::{CursorMode, ScreenCast, SourceType};
 use std::sync::Mutex;
 use types::{
     audio_frame::{EncodedAudioFrame, RawAudioFrame},
-    config::{AudioEncoder as AudioEncoderType, QualityPreset, VideoEncoder as VideoEncoderType},
+    config::{
+        AudioEncoder as AudioEncoderType, AudioSource, QualityPreset,
+        VideoEncoder as VideoEncoderType,
+    },
     error::{Result, WaycapError},
     video_frame::{EncodedVideoFrame, RawVideoFrame},
 };
@@ -96,6 +103,7 @@ mod waycap_vulkan;
 #[cfg(all(feature = "nvidia", feature = "egl"))]
 mod waycap_egl;
 
+pub use crate::capture::audio_device::list_audio_devices;
 pub use crate::encoders::dma_buf_encoder::DmaBufEncoder;
 pub use crate::encoders::dynamic_encoder::DynamicEncoder;
 #[cfg(feature = "nvidia")]
@@ -105,6 +113,7 @@ pub use crate::encoders::rgba_image_encoder::RgbaImageEncoder;
 pub use crate::encoders::vaapi_encoder::VaapiEncoder;
 pub use encoders::video::VideoEncoder;
 pub use utils::TIME_UNIT_NS;
+use utils::{TARGET_AUDIO_CHANNELS, TARGET_AUDIO_SAMPLE_RATE};
 
 use crate::encoders::video::{PipewireSPA, StartVideoEncoder};
 
@@ -154,7 +163,7 @@ pub struct Capture<V: VideoEncoder + Send> {
     pw_video_terminate_tx: Option<pipewire::channel::Sender<Terminate>>,
 
     audio_encoder: Option<Arc<Mutex<dyn AudioEncoder + Send>>>,
-    pw_audio_terminate_tx: Option<pipewire::channel::Sender<Terminate>>,
+    pw_audio_terminate_txs: Vec<pipewire::channel::Sender<Terminate>>,
 
     /// Restore token returned by the XDG portal after a successful session start.
     /// Save this and pass it to [`CaptureBuilder::with_restore_token`] on subsequent launches
@@ -167,6 +176,7 @@ pub struct Capture<V: VideoEncoder + Send> {
 pub struct CaptureControls {
     stop_flag: AtomicBool,
     pause_flag: AtomicBool,
+    mic_muted: AtomicBool,
     target_fps: AtomicU64,
 }
 
@@ -175,6 +185,7 @@ impl CaptureControls {
         Self {
             stop_flag: AtomicBool::new(false),
             pause_flag: AtomicBool::new(true),
+            mic_muted: AtomicBool::new(false),
             target_fps: AtomicU64::new(target_fps),
         }
     }
@@ -211,12 +222,23 @@ impl CaptureControls {
     pub fn frame_interval_ns(&self) -> u64 {
         TIME_UNIT_NS / self.target_fps.load(Ordering::Acquire)
     }
+
+    /// Toggle whether the mic is muted (if enabled), returning the new muted state.
+    pub fn toggle_mic(&self) -> bool {
+        !self.mic_muted.fetch_xor(true, Ordering::AcqRel)
+    }
+
+    /// Check whether the microphone source is currently muted.
+    pub fn is_mic_muted(&self) -> bool {
+        self.mic_muted.load(Ordering::Acquire)
+    }
 }
 
-/// State of audio/video readiness, used internally
+/// State of audio/video readiness; audio is a count since 0-2 independent streams can be active.
 #[derive(Default, Debug)]
 pub struct ReadyState {
-    audio: AtomicBool,
+    audio_streams_ready: AtomicU32,
+    expected_audio_streams: AtomicU32,
     video: AtomicBool,
 }
 
@@ -225,10 +247,23 @@ impl ReadyState {
         self.video.load(Ordering::Acquire)
     }
     pub fn audio_ready(&self) -> bool {
-        self.audio.load(Ordering::Acquire)
+        self.audio_streams_ready.load(Ordering::Acquire)
+            >= self.expected_audio_streams.load(Ordering::Acquire)
+    }
+    /// Must be called before spawning any audio capture threads.
+    fn set_expected_audio_streams(&self, count: u32) {
+        self.expected_audio_streams.store(count, Ordering::Release);
+    }
+    /// Called from a stream's `state_changed` callback to keep the shared ready count in sync.
+    fn note_audio_stream_transition(&self, was_streaming: bool, now_streaming: bool) {
+        if now_streaming && !was_streaming {
+            self.audio_streams_ready.fetch_add(1, Ordering::AcqRel);
+        } else if was_streaming && !now_streaming {
+            self.audio_streams_ready.fetch_sub(1, Ordering::AcqRel);
+        }
     }
     fn wait_for_both(&self) {
-        while !self.audio.load(Ordering::Acquire) || !self.video.load(Ordering::Acquire) {
+        while !self.audio_ready() || !self.video_ready() {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -245,7 +280,7 @@ impl<V: VideoEncoder + PipewireSPA + StartVideoEncoder> Capture<V> {
             video_encoder: Some(Arc::new(Mutex::new(video_encoder))),
             audio_encoder: None,
             pw_video_terminate_tx: None,
-            pw_audio_terminate_tx: None,
+            pw_audio_terminate_txs: Vec::new(),
             restore_token: None,
         };
 
@@ -253,8 +288,8 @@ impl<V: VideoEncoder + PipewireSPA + StartVideoEncoder> Capture<V> {
             _self.start_pipewire_video(include_cursor, None)?;
         _self.restore_token = restore_token;
 
+        // No audio streams here, so `expected_audio_streams` stays 0 and `audio_ready()` is trivially true.
         std::thread::sleep(Duration::from_millis(100));
-        ready_state.audio.store(true, Ordering::Release);
         _self.start().unwrap();
 
         ready_state.wait_for_both();
@@ -344,29 +379,25 @@ impl<V: VideoEncoder + PipewireSPA + StartVideoEncoder> Capture<V> {
         Ok((frame_rx, ready_state, resolution, new_restore_token))
     }
 
-    fn start_pipewire_audio(
+    /// Spawn one PipeWire audio capture thread for a single [`AudioSource`].
+    fn spawn_audio_capture(
         &mut self,
-        audio_encoder_type: AudioEncoderType,
         ready_state: Arc<ReadyState>,
+        audio_source: AudioSource,
     ) -> Result<Receiver<RawAudioFrame>> {
         let (pw_audio_sender, pw_audio_recv) = pipewire::channel::channel();
-        self.pw_audio_terminate_tx = Some(pw_audio_sender);
+        self.pw_audio_terminate_txs.push(pw_audio_sender);
         let (audio_tx, audio_rx): (Sender<RawAudioFrame>, Receiver<RawAudioFrame>) = bounded(10);
         let controls = Arc::clone(&self.controls);
         let pw_audio_worker = std::thread::spawn(move || -> Result<()> {
-            log::debug!("Starting audio stream");
-            let mut audio_cap = AudioCapture::new(ready_state, audio_tx, pw_audio_recv, controls)?;
+            log::debug!("Starting audio stream for {audio_source:?}");
+            let mut audio_cap =
+                AudioCapture::new(ready_state, audio_tx, pw_audio_recv, controls, audio_source)?;
             audio_cap.run();
             Ok(())
         });
 
         self.worker_handles.push(pw_audio_worker);
-
-        let enc: Arc<Mutex<dyn AudioEncoder + Send>> = match audio_encoder_type {
-            AudioEncoderType::Opus => Arc::new(Mutex::new(OpusEncoder::new()?)),
-        };
-
-        self.audio_encoder = Some(enc);
 
         Ok(audio_rx)
     }
@@ -417,7 +448,7 @@ impl<V: VideoEncoder> Capture<V> {
         if let Some(pw_vid) = &self.pw_video_terminate_tx {
             let _ = pw_vid.send(Terminate {});
         }
-        if let Some(pw_aud) = &self.pw_audio_terminate_tx {
+        for pw_aud in &self.pw_audio_terminate_txs {
             let _ = pw_aud.send(Terminate {});
         }
 
@@ -443,9 +474,12 @@ impl<V: VideoEncoder> Capture<V> {
 }
 
 impl Capture<DynamicEncoder> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         video_encoder_type: Option<VideoEncoderType>,
         audio_encoder_type: AudioEncoderType,
+        audio_source: AudioSource,
+        mic_source: Option<AudioSource>,
         quality: QualityPreset,
         include_cursor: bool,
         include_audio: bool,
@@ -458,7 +492,7 @@ impl Capture<DynamicEncoder> {
             video_encoder: None,
             audio_encoder: None,
             pw_video_terminate_tx: None,
-            pw_audio_terminate_tx: None,
+            pw_audio_terminate_txs: Vec::new(),
             restore_token: None,
         };
 
@@ -473,21 +507,37 @@ impl Capture<DynamicEncoder> {
             quality,
         )?)));
 
-        if include_audio {
-            let audio_rx =
-                _self.start_pipewire_audio(audio_encoder_type, Arc::clone(&ready_state))?;
-            // Wait until both either threads are ready
+        // Must be set before spawning any audio capture thread so readiness tracking doesn't race.
+        let expected_audio_streams = include_audio as u32 + mic_source.is_some() as u32;
+        ready_state.set_expected_audio_streams(expected_audio_streams);
+
+        if expected_audio_streams > 0 {
+            let system_audio_rx = if include_audio {
+                Some(_self.spawn_audio_capture(Arc::clone(&ready_state), audio_source)?)
+            } else {
+                None
+            };
+            let mic_rx = match mic_source {
+                Some(source) => Some(_self.spawn_audio_capture(Arc::clone(&ready_state), source)?),
+                None => None,
+            };
+
+            let enc: Arc<Mutex<dyn AudioEncoder + Send>> = match audio_encoder_type {
+                AudioEncoderType::Opus => Arc::new(Mutex::new(OpusEncoder::new()?)),
+            };
+            _self.audio_encoder = Some(enc);
+
+            // Wait until all audio threads (and video) are ready
             ready_state.wait_for_both();
-            let audio_loop = audio_encoding_loop(
+            let audio_loop = audio_mixing_loop(
                 Arc::clone(_self.audio_encoder.as_ref().unwrap()),
-                audio_rx,
+                system_audio_rx,
+                mic_rx,
                 Arc::clone(&_self.controls),
             );
 
             _self.worker_handles.push(audio_loop);
         } else {
-            println!("No audio");
-            ready_state.audio.store(true, Ordering::Release);
             ready_state.wait_for_both();
         }
 
@@ -601,14 +651,20 @@ impl<V: VideoEncoder> Drop for Capture<V> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn audio_encoding_loop(
+/// Caps queued mic backlog so a muted or stalled mic can't grow it unbounded.
+const MAX_MIC_BACKLOG_SAMPLES: usize =
+    TARGET_AUDIO_SAMPLE_RATE as usize * TARGET_AUDIO_CHANNELS as usize;
+
+/// Mixes and encodes raw audio frames from whichever of system audio / mic are active; system
+/// audio drives frame cadence when both are present.
+fn audio_mixing_loop(
     audio_encoder: Arc<Mutex<dyn AudioEncoder + Send>>,
-    audio_recv: Receiver<RawAudioFrame>,
+    system_audio_recv: Option<Receiver<RawAudioFrame>>,
+    mic_recv: Option<Receiver<RawAudioFrame>>,
     controls: Arc<CaptureControls>,
 ) -> std::thread::JoinHandle<Result<()>> {
     std::thread::spawn(move || -> Result<()> {
-        // CUDA contexts are thread local so set ours to this thread
+        let mut mic_backlog: VecDeque<f32> = VecDeque::new();
 
         while !controls.is_stopped() {
             if controls.is_paused() {
@@ -616,23 +672,70 @@ fn audio_encoding_loop(
                 continue;
             }
 
-            select! {
-                recv(audio_recv) -> raw_samples => {
-                    match raw_samples {
-                        Ok(raw_samples) => {
-                            // If we are getting samples then we know this must be set or we
-                            // wouldn't be in here
-                            audio_encoder.as_ref().lock().unwrap().process(raw_samples)?;
+            let frame = match (&system_audio_recv, &mic_recv) {
+                (Some(sys_recv), Some(mic_recv)) => select! {
+                    recv(sys_recv) -> frame => match frame {
+                        Ok(mut frame) => {
+                            // Boost system audio before mixing mic in, not after - boosting the
+                            // combined signal would also amplify the mic's noise floor into static.
+                            boost_with_rms(&mut frame.samples)?;
+                            while let Ok(mic_frame) = mic_recv.try_recv() {
+                                mic_backlog.extend(mic_frame.samples);
+                            }
+                            while mic_backlog.len() > MAX_MIC_BACKLOG_SAMPLES {
+                                mic_backlog.pop_front();
+                            }
+                            if !controls.is_mic_muted() {
+                                for sample in frame.samples.iter_mut() {
+                                    let Some(mic_sample) = mic_backlog.pop_front() else {
+                                        break;
+                                    };
+                                    *sample = (*sample + mic_sample).clamp(-1.0, 1.0);
+                                }
+                            }
+                            Some(frame)
                         }
                         Err(_) => {
-                            log::info!("Audio channel disconnected");
-                            break;
+                            log::info!("System audio channel disconnected");
+                            None
                         }
-                    }
-                }
-                default(Duration::from_millis(100)) => {
-                    // Timeout to check stop/pause flags periodically
-                }
+                    },
+                    default(Duration::from_millis(100)) => continue,
+                },
+                (Some(sys_recv), None) => select! {
+                    recv(sys_recv) -> frame => match frame {
+                        Ok(mut frame) => {
+                            boost_with_rms(&mut frame.samples)?;
+                            Some(frame)
+                        }
+                        Err(_) => {
+                            log::info!("System audio channel disconnected");
+                            None
+                        }
+                    },
+                    default(Duration::from_millis(100)) => continue,
+                },
+                (None, Some(mic_recv)) => select! {
+                    recv(mic_recv) -> frame => match frame {
+                        Ok(mut frame) => {
+                            if controls.is_mic_muted() {
+                                frame.samples.iter_mut().for_each(|s| *s = 0.0);
+                            }
+                            Some(frame)
+                        }
+                        Err(_) => {
+                            log::info!("Mic audio channel disconnected");
+                            None
+                        }
+                    },
+                    default(Duration::from_millis(100)) => continue,
+                },
+                (None, None) => break,
+            };
+
+            match frame {
+                Some(frame) => audio_encoder.as_ref().lock().unwrap().process(frame)?,
+                None => break,
             }
         }
         Ok(())

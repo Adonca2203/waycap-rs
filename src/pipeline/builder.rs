@@ -1,7 +1,7 @@
 use crate::{
     encoders::dynamic_encoder::DynamicEncoder,
     types::{
-        config::{AudioEncoder, QualityPreset, VideoEncoder},
+        config::{AudioEncoder, AudioSource, QualityPreset, VideoEncoder},
         error::Result,
     },
     Capture,
@@ -10,6 +10,8 @@ use crate::{
 pub struct CaptureBuilder {
     video_encoder: Option<VideoEncoder>,
     audio_encoder: Option<AudioEncoder>,
+    audio_source: AudioSource,
+    mic_source: Option<AudioSource>,
     quality_preset: Option<QualityPreset>,
     include_cursor: bool,
     include_audio: bool,
@@ -28,6 +30,8 @@ impl CaptureBuilder {
         Self {
             video_encoder: None,
             audio_encoder: None,
+            audio_source: AudioSource::default(),
+            mic_source: None,
             quality_preset: None,
             include_cursor: false,
             include_audio: false,
@@ -55,8 +59,28 @@ impl CaptureBuilder {
         self
     }
 
+    /// Capture system audio (the default playback device). Default audio source when enabled.
     pub fn with_audio(mut self) -> Self {
         self.include_audio = true;
+        self
+    }
+
+    /// Additionally capture the default microphone, mixed into the same audio track as system audio.
+    pub fn with_mic(mut self) -> Self {
+        self.mic_source = Some(AudioSource::DefaultInput);
+        self
+    }
+
+    /// Like [`Self::with_mic`], but for a specific mic/input device; see [`crate::list_audio_devices`].
+    pub fn with_mic_source(mut self, source: AudioSource) -> Self {
+        self.mic_source = Some(source);
+        self
+    }
+
+    /// Capture a specific system-audio target instead of the default playback device.
+    pub fn with_audio_source(mut self, source: AudioSource) -> Self {
+        self.include_audio = true;
+        self.audio_source = source;
         self
     }
 
@@ -86,11 +110,8 @@ impl CaptureBuilder {
             None => QualityPreset::Medium,
         };
 
-        let audio_encoder = if self.include_audio {
-            match self.audio_encoder {
-                Some(enc) => enc,
-                None => AudioEncoder::Opus,
-            }
+        let audio_encoder = if self.include_audio || self.mic_source.is_some() {
+            self.audio_encoder.unwrap_or(AudioEncoder::Opus)
         } else {
             AudioEncoder::Opus
         };
@@ -98,6 +119,8 @@ impl CaptureBuilder {
         Capture::new(
             self.video_encoder,
             audio_encoder,
+            self.audio_source,
+            self.mic_source,
             quality,
             self.include_cursor,
             self.include_audio,

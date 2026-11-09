@@ -1,6 +1,13 @@
-use std::{process::Command, sync::Arc};
+use std::sync::Arc;
 
-use crate::{types::audio_frame::RawAudioFrame, CaptureControls, ReadyState};
+use crate::{
+    types::{
+        audio_frame::RawAudioFrame,
+        config::AudioSource,
+        error::Result as WaycapResult,
+    },
+    CaptureControls, ReadyState,
+};
 use crossbeam::channel::Sender;
 use pipewire::{
     self as pw,
@@ -18,7 +25,7 @@ use pipewire::{
     sys::pw_stream_get_nsec,
 };
 
-use super::Terminate;
+use super::{audio_device, Terminate};
 
 #[derive(Clone, Copy, Default)]
 struct UserData {
@@ -45,10 +52,14 @@ impl AudioCapture {
         audio_sender: Sender<RawAudioFrame>,
         termination_recv: pw::channel::Receiver<Terminate>,
         controls: Arc<CaptureControls>,
-    ) -> Result<Self, pw::Error> {
+        audio_source: AudioSource,
+    ) -> WaycapResult<Self> {
         let pw_loop = MainLoopRc::new(None)?;
         let pw_context = ContextRc::new(&pw_loop, None)?;
         let core = pw_context.connect_rc(None)?;
+
+        let target_node_id = audio_device::resolve_node_id(&core, &pw_loop, &audio_source)?;
+        log::debug!("Resolved audio target node id: {target_node_id} for {audio_source:?}");
 
         let mut core_mut = core.clone();
         let core_listener = Self::setup_core_listener(&mut core_mut);
@@ -56,7 +67,7 @@ impl AudioCapture {
         let mut stream = Self::create_stream(core.clone())?;
         let stream_listener =
             Self::setup_stream_listener(&mut stream, ready_state, controls, audio_sender)?;
-        Self::connect_stream(&mut stream)?;
+        Self::connect_stream(&mut stream, target_node_id)?;
 
         Ok(Self {
             termination_recv: Some(termination_recv),
@@ -104,9 +115,9 @@ impl AudioCapture {
             .add_local_listener_with_user_data(UserData::default())
             .state_changed(move |_, _, old, new| {
                 log::info!("Audio Stream State Changed: {old:?} -> {new:?}");
-                ready_state.audio.store(
+                ready_state.note_audio_stream_transition(
+                    old == StreamState::Streaming,
                     new == StreamState::Streaming,
-                    std::sync::atomic::Ordering::Release,
                 );
             })
             .param_changed(|_, udata, id, param| {
@@ -183,25 +194,17 @@ impl AudioCapture {
         Ok(stream_listener)
     }
 
-    fn connect_stream(stream: &mut StreamRc) -> Result<(), pw::Error> {
-        let audio_spa_obj = pw::spa::pod::object! {
-            pw::spa::utils::SpaTypes::ObjectParamFormat,
-            pw::spa::param::ParamType::EnumFormat,
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::MediaType,
-                Id,
-                pw::spa::param::format::MediaType::Audio
-            ),
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::MediaSubtype,
-                Id,
-                pw::spa::param::format::MediaSubtype::Raw
-            ),
-            pw::spa::pod::property!(
-                pw::spa::param::format::FormatProperties::AudioFormat,
-                Id,
-                pw::spa::param::audio::AudioFormat::F32LE
-            )
+    fn connect_stream(stream: &mut StreamRc, target_node_id: u32) -> WaycapResult<()> {
+        // Fixed rate/channels so mic + system audio samples can be safely summed when mixing.
+        let mut audio_info = spa::param::audio::AudioInfoRaw::new();
+        audio_info.set_format(spa::param::audio::AudioFormat::F32LE);
+        audio_info.set_rate(crate::utils::TARGET_AUDIO_SAMPLE_RATE);
+        audio_info.set_channels(crate::utils::TARGET_AUDIO_CHANNELS);
+
+        let audio_spa_obj = pw::spa::pod::Object {
+            type_: pw::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+            id: pw::spa::param::ParamType::EnumFormat.as_raw(),
+            properties: audio_info.into(),
         };
 
         let audio_spa_values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
@@ -214,15 +217,14 @@ impl AudioCapture {
 
         let mut audio_params = [Pod::from_bytes(&audio_spa_values).unwrap()];
 
-        let sink_id_to_use = get_default_sink_node_id();
-        log::debug!("Default sink id: {sink_id_to_use:?}");
-
-        stream.connect(
-            Direction::Input,
-            sink_id_to_use,
-            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
-            &mut audio_params,
-        )
+        stream
+            .connect(
+                Direction::Input,
+                Some(target_node_id),
+                StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
+                &mut audio_params,
+            )
+            .map_err(Into::into)
     }
 
     pub fn run(&mut self) {
@@ -236,17 +238,4 @@ impl AudioCapture {
         log::debug!("Audio Stream: {:?}", self.pipewire_state._stream);
         self.pipewire_state.pw_loop.run();
     }
-}
-
-// Theres gotta be a less goofy way to do this
-fn get_default_sink_node_id() -> Option<u32> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(r#"pactl list sinks | awk -v sink="$(pactl info | grep 'Default Sink' | cut -d' ' -f3)" '$0 ~ "Name: " sink { found=1 } found && /object.id/ { print $NF; exit }'"#)
-        .output()
-        .expect("Failed to execute command");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let cleaned = stdout.replace('"', "");
-    cleaned.trim().parse::<u32>().ok()
 }

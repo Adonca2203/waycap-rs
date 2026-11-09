@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use crate::types::audio_frame::EncodedAudioFrame;
 
-use super::audio::{boost_with_rms, AudioEncoder};
+use super::audio::AudioEncoder;
 
 pub struct OpusEncoder {
     encoder: Option<ffmpeg::codec::encoder::Audio>,
@@ -24,13 +24,14 @@ impl OpusEncoder {
             .encoder()
             .audio()?;
 
-        encoder_ctx.set_rate(48000);
+        let sample_rate = crate::utils::TARGET_AUDIO_SAMPLE_RATE as i32;
+        encoder_ctx.set_rate(sample_rate);
         encoder_ctx.set_bit_rate(70_000);
         encoder_ctx.set_format(ffmpeg::format::Sample::F32(
             ffmpeg_next::format::sample::Type::Packed,
         ));
-        encoder_ctx.set_time_base(Rational::new(1, 48000));
-        encoder_ctx.set_frame_rate(Some(Rational::new(1, 48000)));
+        encoder_ctx.set_time_base(Rational::new(1, sample_rate));
+        encoder_ctx.set_frame_rate(Some(Rational::new(1, sample_rate)));
         encoder_ctx.set_channel_layout(ffmpeg::channel_layout::ChannelLayout::STEREO);
 
         let encoder = encoder_ctx.open()?;
@@ -59,7 +60,7 @@ impl AudioEncoder for OpusEncoder {
 
     fn process(
         &mut self,
-        mut raw_frame: crate::types::audio_frame::RawAudioFrame,
+        raw_frame: crate::types::audio_frame::RawAudioFrame,
     ) -> crate::types::error::Result<()> {
         if let Some(ref mut encoder) = self.encoder {
             let n_channels = encoder.channels() as usize;
@@ -74,9 +75,6 @@ impl AudioEncoder for OpusEncoder {
             let frame_size = encoder.frame_size() as usize;
             let chunk_size = frame_size * n_channels;
 
-            // Boost the audio so that even if system audio level is low
-            // it's still audible in playback
-            boost_with_rms(&mut raw_frame.samples)?;
             self.leftover_data.extend(raw_frame.samples);
 
             // Send chunked frames to encoder
